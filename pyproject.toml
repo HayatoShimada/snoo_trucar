@@ -1,0 +1,25 @@
+[project]
+name = "snoo-trucar"
+version = "0.1.0"
+description = "PiCar-X（SunFounder）で飼い猫の snoo を探して追う"
+readme = "README.md"
+# 85pi4 は Raspberry Pi OS Trixie の Python 3.13。picamera2 / numpy / simplejpeg は apt のものを使う
+# （venv は --system-site-packages で作る）。robot-hat / picarx は deploy/install.sh で GitHub から入れる
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

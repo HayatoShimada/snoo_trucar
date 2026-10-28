@@ -1,0 +1,16 @@
+# ~/.config/snoo_trucar/config.toml。全項目と既定値は snoo_trucar/config.py
+
+[server]
+host = "home-linux.taila713c8.ts.net"
+port = 8710
+
+[control]
+# 起動したときの行動。idle にして USR ボタンで選ぶ（1 回: 探す / 2 回: 距離を保つ / 3 回: 部屋を撮る / 長押し: 止まる）
+mode = "idle"
+# サーバーが snoo の判定（"snoo" の値）を返すまでは false（猫なら追う）
+require_snoo = false
+keep_distance_cm = 80
+# 「大きく動かさない」ため小さめ（picarx の 0..100）
+max_speed = 20
+# 探すときに車体も動かすか（false ならカメラを振るだけ）
+search_drive = false

@@ -1,0 +1,14 @@
+[Unit]
+Description=snoo_trucar（PiCar-X で snoo を探して追う。USR ボタンで行動を選ぶ）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/snoo_trucar
+ExecStart=%h/snoo_trucar/.venv/bin/python -m snoo_trucar run
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
