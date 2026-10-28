@@ -37,6 +37,9 @@ def test_pick_snoo():
     reply = parse_reply(make_reply(1, 0, 0, [{"box": [0, 0, 0.2, 0.2], "cat": 0.7, "snoo": None}]))
     assert pick_snoo(reply.boxes, 0.35, 0.6, True)[0] is None
     assert pick_snoo(reply.boxes, 0.35, 0.6, False)[0] is not None
+    # 暗い画像で出る、画面全体の箱
+    reply = parse_reply(make_reply(1, 0, 0, [{"box": [0, 0, 1, 1], "cat": 0.5, "snoo": None}]))
+    assert pick_snoo(reply.boxes, 0.35, 0.6, False)[0] is None
 
 
 def test_seqbuffer():
@@ -191,3 +194,16 @@ def test_sim_finds_snoo():
     assert sorted(errs)[len(errs) // 2] < 3.0  # 方位の推定の誤差（中央値）
     dists = [x[5] for x in track]  # 真の距離
     assert min(dists) > 15.0  # ぶつかっていない
+
+
+def test_confirm_needs_repeated_hits():
+    from snoo_trucar.link import Confirm
+
+    c = Confirm(3, 0.5, 0.7)
+    ms = 1_000_000
+    assert not c.hit(0)  # 1 回だけの誤検出は通さない
+    assert not c.hit(1000 * ms)  # 間があいた
+    assert not c.hit(1033 * ms)
+    assert c.hit(1066 * ms)  # 0.5 秒以内に 3 回
+    assert c.hit(1500 * ms)  # 追っている間は 1 回でも通す
+    assert not c.hit(3000 * ms)  # 見失ったあとは、また 3 回要る

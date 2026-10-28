@@ -43,7 +43,13 @@ class ControlConfig:
     # snoo とみなす確率。サーバーが snoo を返さないとき（猫の検出だけ）は require_snoo=false にする
     snoo_threshold: float = 0.6
     require_snoo: bool = True
-    cat_threshold: float = 0.35
+    # 暗い画像で、検出器が画面全体を猫（0.3〜0.4）と返すことがある。本物の猫は 0.8 前後
+    cat_threshold: float = 0.45
+    # これより大きい箱（画面に対する面積の比）は捨てる
+    max_box_area: float = 0.8
+    # 誤検出で追い始めないよう、confirm_window_s の間に confirm_hits 回見えたら追い始める
+    confirm_hits: int = 3
+    confirm_window_s: float = 0.5
     # 距離（cm）
     keep_distance_cm: float = 80.0
     follow_distance_cm: float = 50.0

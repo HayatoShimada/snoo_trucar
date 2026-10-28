@@ -70,11 +70,12 @@ def make_reply(seq: int, t_capture_ns: int, infer_ms: float, dets: list[dict]) -
     ).encode()
 
 
-def pick_snoo(boxes: list[Box], cat_threshold: float, snoo_threshold: float, require_snoo: bool):
+def pick_snoo(boxes: list[Box], cat_threshold: float, snoo_threshold: float, require_snoo: bool,
+              max_box_area: float = 0.8):  # fmt: skip
     """snoo らしい箱を 1 つ選ぶ。無ければ None"""
     best, best_score = None, 0.0
     for b in boxes:
-        if b.cat < cat_threshold:
+        if b.cat < cat_threshold or b.w * b.h > max_box_area:
             continue
         if b.snoo is None:
             if require_snoo:

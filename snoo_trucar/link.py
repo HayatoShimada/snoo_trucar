@@ -25,6 +25,28 @@ class LinkStats:
     _in_flight: dict[int, int] = field(default_factory=dict)
 
 
+class Confirm:
+    """続けて見えたときだけ通す。追っている間（最後に通してから coast_s 以内）は 1 回でも通す"""
+
+    def __init__(self, hits: int, window_s: float, coast_s: float):
+        self.hits = hits
+        self.window_ns = int(window_s * 1e9)
+        self.coast_ns = int(coast_s * 1e9)
+        self._recent: list[int] = []
+        self._last_pass: int | None = None
+
+    def hit(self, t_ns: int) -> bool:
+        if self._last_pass is not None and t_ns - self._last_pass <= self.coast_ns:
+            self._last_pass = t_ns
+            return True
+        self._recent = [t for t in self._recent if t_ns - t <= self.window_ns] + [t_ns]
+        if len(self._recent) >= self.hits:
+            self._recent = []
+            self._last_pass = t_ns
+            return True
+        return False
+
+
 class Link:
     def __init__(self, cfg: Config, meas: SeqBuffer):
         self.cfg = cfg
@@ -36,6 +58,8 @@ class Link:
         self.stats = LinkStats()
         self._lock = threading.Lock()
         self._seq = 0
+        self.confirm = Confirm(cfg.control.confirm_hits, cfg.control.confirm_window_s,
+                               cfg.control.coast_s)  # fmt: skip
 
     def can_send(self, now_ns: int) -> bool:
         timeout_ns = int(self.cfg.server.reply_timeout_s * 1e9)
@@ -87,11 +111,13 @@ class Link:
                     st.dropped += 1
                     continue
             box, score = pick_snoo(
-                reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo
+                reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo,
+                ctl.max_box_area,
             )
             if box is not None:
                 self.stats.snoo_hits += 1
-                self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score))
+                if self.confirm.hit(reply.t_capture_ns):
+                    self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score))
 
     def close(self) -> None:
         self.sock.close()
