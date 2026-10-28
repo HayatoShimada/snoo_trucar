@@ -7,8 +7,8 @@ port = 8710
 [control]
 # 起動したときの行動。idle にして USR ボタンで選ぶ（1 回: 探す / 2 回: 距離を保つ / 3 回: 部屋を撮る / 長押し: 止まる）
 mode = "idle"
-# サーバーが snoo の判定（"snoo" の値）を返すまでは false（猫なら追う）
-require_snoo = false
+# snoo と判定した猫だけを追う（snoo >= snoo_threshold）。false なら判定が無くても猫なら追う
+require_snoo = true
 keep_distance_cm = 80
 # picarx の 0..100。30 でおよそ 0.3〜0.4 m/s（snoo_trucar/config.py の説明）
 max_speed = 30
