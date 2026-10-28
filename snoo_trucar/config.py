@@ -35,7 +35,9 @@ class ServerConfig:
 
 @dataclass
 class ControlConfig:
-    rate_hz: float = 5000.0
+    # 推定と制御則の周期。ハードが受け取れるのは 50 Hz（サーボの PWM の周期 20 ms）なので、その 20 倍の 1 kHz。
+    # 5 kHz でも回るが、1 コアを 100% 使う（1 kHz なら 2 割ほど）。推定は実際の dt で進めるので、周期の揺れは効かない
+    rate_hz: float = 1000.0
     # 制御ループを固定する CPU（-1 で固定しない）
     cpu: int = 3
     # 起動したときの行動（controller.MODES）。USR ボタンで変わる
@@ -58,11 +60,13 @@ class ControlConfig:
     distance_k: float = 33.0
     # 超音波がこの距離より近ければ前に進まない
     stop_distance_cm: float = 20.0
-    # 速さ（picarx の -100..100）。「大きく動かさない」ため小さめ
-    max_speed: float = 20.0
+    # 速さ（picarx の -100..100）。picarx は 0 以外の速さ s を PWM のデューティ 50 + s/2 % にする（30 → 65 %）。
+    # TT モーター（1:48、約 200 rpm）と後輪（径 約 6.5 cm）から、100 で 0.6〜0.7 m/s、30 で 0.3〜0.4 m/s くらい（実測していない）。
+    # 室内で、超音波が使えないときも、見てから止まるまで（遅れ 0.1 s）に 10 cm ほどで済む速さにしている
+    max_speed: float = 30.0
     # 探すときに車体も動かす（false ならカメラを振るだけ）
     search_drive: bool = False
-    search_drive_speed: float = 15.0
+    search_drive_speed: float = 20.0
     # 見失ってから予測だけで追う時間と、探し始めるまでの時間
     coast_s: float = 0.7
     lost_s: float = 2.0
@@ -80,7 +84,10 @@ class ControlConfig:
 class CarConfig:
     # picar-x の較正値（servo のずれなど）。picarx が自分で読み書きする
     picarx_config: str = str(Path.home() / ".config" / "snoo_trucar" / "picar-x.conf")
+    # サーボの PWM（robot_hat の Servo.FREQ）と同じ 50 Hz。速くしても、サーボは 20 ms ごとにしか新しい角度を受け取らない。
+    # I2C の書き込みは 1 回 0.45 ms で、全部（ハンドル・パン・チルト・モーター 2 つ）書いても 3 ms ほど
     actuator_hz: float = 50.0
+    # 超音波（HC-SR04 型）は、前の反響が消えるまで 60 ms あけるのがよいとされるので 15 Hz
     ultrasonic_hz: float = 15.0
     pan_min: float = -35.0
     pan_max: float = 35.0

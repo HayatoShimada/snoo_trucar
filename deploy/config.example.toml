@@ -10,7 +10,7 @@ mode = "idle"
 # サーバーが snoo の判定（"snoo" の値）を返すまでは false（猫なら追う）
 require_snoo = false
 keep_distance_cm = 80
-# 「大きく動かさない」ため小さめ（picarx の 0..100）
-max_speed = 20
+# picarx の 0..100。30 でおよそ 0.3〜0.4 m/s（snoo_trucar/config.py の説明）
+max_speed = 30
 # 探すときに車体も動かすか（false ならカメラを振るだけ）
 search_drive = false
