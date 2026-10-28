@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from .config import Config
 from .protocol import pack_frame, parse_reply, pick_snoo
@@ -34,8 +36,10 @@ class Confirm:
         self.coast_ns = int(coast_s * 1e9)
         self._recent: list[int] = []
         self._last_pass: int | None = None
+        self.started = False  # 直前の hit で追い始めた（見失ってから続けて見えた）
 
     def hit(self, t_ns: int) -> bool:
+        self.started = False
         if self._last_pass is not None and t_ns - self._last_pass <= self.coast_ns:
             self._last_pass = t_ns
             return True
@@ -43,12 +47,15 @@ class Confirm:
         if len(self._recent) >= self.hits:
             self._recent = []
             self._last_pass = t_ns
+            self.started = True
             return True
         return False
 
 
 class Link:
-    def __init__(self, cfg: Config, meas: SeqBuffer):
+    SEEN_GAP_NS = 10_000_000_000  # 見つけたときの写真は 10 秒に 1 枚まで
+
+    def __init__(self, cfg: Config, meas: SeqBuffer, seen_dir: Path | None = None):
         self.cfg = cfg
         self.meas = meas
         self.addr = (socket.gethostbyname(cfg.server.host), cfg.server.port)
@@ -60,6 +67,10 @@ class Link:
         self._seq = 0
         self.confirm = Confirm(cfg.control.confirm_hits, cfg.control.confirm_window_s,
                                cfg.control.coast_s)  # fmt: skip
+        # 追い始めたときの画像と箱を残す（snoo を本当に見ていたかを後から人が確かめるため）
+        self.seen_dir = seen_dir
+        self._frames: dict[int, bytes] = {}
+        self._last_seen_save = 0
 
     def can_send(self, now_ns: int) -> bool:
         timeout_ns = int(self.cfg.server.reply_timeout_s * 1e9)
@@ -75,6 +86,10 @@ class Link:
         data = pack_frame(self._seq, t_capture_ns, cam.width, cam.height, jpeg)
         with self._lock:
             self.stats._in_flight[self._seq] = time.monotonic_ns()
+            if self.seen_dir is not None:
+                self._frames[self._seq] = jpeg
+                for seq in [q for q in self._frames if q not in self.stats._in_flight]:
+                    del self._frames[seq]
             self.stats.sent += 1
             self.stats.jpeg_bytes = len(jpeg)
         self.sock.sendto(data, self.addr)
@@ -99,6 +114,7 @@ class Link:
             with self._lock:
                 st = self.stats
                 sent_ns = st._in_flight.pop(reply.seq, None)
+                jpeg = self._frames.pop(reply.seq, None)
                 # サーバーは溜まった古いフレームを返事なしで捨てるので、それより前の分は諦める
                 for seq in [s for s in st._in_flight if s < reply.seq]:
                     del st._in_flight[seq]
@@ -118,6 +134,19 @@ class Link:
                 self.stats.snoo_hits += 1
                 if self.confirm.hit(reply.t_capture_ns):
                     self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score))
+                    if self.confirm.started and jpeg is not None:
+                        self._save_seen(now, jpeg, reply, box)
+
+    def _save_seen(self, now_ns: int, jpeg: bytes, reply, box) -> None:
+        if now_ns - self._last_seen_save < self.SEEN_GAP_NS:
+            return
+        self._last_seen_save = now_ns
+        self.seen_dir.mkdir(parents=True, exist_ok=True)
+        stem = self.seen_dir / time.strftime("seen_%Y%m%d_%H%M%S")
+        stem.with_suffix(".jpg").write_bytes(jpeg)
+        info = {"t_capture_ns": reply.t_capture_ns, "picked": asdict(box),
+                "boxes": [asdict(b) for b in reply.boxes]}  # fmt: skip
+        stem.with_suffix(".json").write_text(json.dumps(info, indent=1))
 
     def close(self) -> None:
         self.sock.close()

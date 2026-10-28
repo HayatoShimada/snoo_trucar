@@ -104,6 +104,7 @@ class Config:
     car: CarConfig = field(default_factory=CarConfig)
     # map で撮った画像の置き場所（map_日時/ に画像と scan.json）
     map_dir: str = "~/captures/snoo_map"
+    seen_dir: str = "~/captures/snoo_seen"  # 追い始めたときの画像と箱
 
 
 def _merge(obj, values: dict, where: str):

@@ -77,7 +77,7 @@ class Runner:
                 camera = FileCamera(cfg.camera, self.camera_file)
             else:
                 camera = Camera(cfg.camera)
-            self.link = Link(cfg, meas)
+            self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser())
             recorder = MapRecorder(Path(cfg.map_dir).expanduser())
 
             def on_frame(t_ns, jpeg):
