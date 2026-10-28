@@ -63,6 +63,8 @@ class Car:
     def close(self) -> None:
         self.px.stop()
         self.px.set_dir_servo_angle(0)
+        self.px.set_cam_pan_angle(0)
+        self.px.set_cam_tilt_angle(0)
         time.sleep(0.05)
 
 

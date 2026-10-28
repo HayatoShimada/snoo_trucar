@@ -23,13 +23,15 @@ CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古け�
 
 class Runner:
     def __init__(self, cfg: Config, sim: bool = False, seconds: float | None = None,
-                 quiet: bool = False, seed: int = 0, buttons: bool = True):  # fmt: skip
+                 quiet: bool = False, seed: int = 0, buttons: bool = True,
+                 camera_file: str | None = None):  # fmt: skip
         self.cfg = cfg
         self.sim = sim
         self.seconds = seconds
         self.quiet = quiet
         self.seed = seed
         self.buttons = buttons
+        self.camera_file = camera_file
         self.mode_buf: SeqBuffer | None = None
         self.last_us: float | None = None
         self.stop = threading.Event()
@@ -65,13 +67,16 @@ class Runner:
             self.world = SimWorld(cfg, car, meas, seed=self.seed)
             threads.append(threading.Thread(target=self.world.run, args=(self.stop,)))
         else:
-            from .camera import Camera
+            from .camera import Camera, FileCamera
             from .hal import Car
             from .link import Link, camera_loop
             from .mapping import MapRecorder
 
             car = Car(cfg.car)
-            camera = Camera(cfg.camera)
+            if self.camera_file:
+                camera = FileCamera(cfg.camera, self.camera_file)
+            else:
+                camera = Camera(cfg.camera)
             self.link = Link(cfg, meas)
             recorder = MapRecorder(Path(cfg.map_dir).expanduser())
 

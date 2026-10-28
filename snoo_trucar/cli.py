@@ -35,7 +35,8 @@ def _run(args) -> None:
         cfg.control.require_snoo = False
     print(f"mode={cfg.control.mode} max_speed={cfg.control.max_speed} sim={args.sim}", flush=True)
     try:
-        Runner(cfg, sim=args.sim, seconds=args.seconds, buttons=not args.no_buttons).run()
+        Runner(cfg, sim=args.sim, seconds=args.seconds, buttons=not args.no_buttons,
+               camera_file=args.camera_file).run()
     except KeyboardInterrupt:
         pass
 
@@ -89,6 +90,7 @@ def main(argv=None) -> None:
         help="起動したときの行動（既定 idle。USR ボタンで変わる）。watch: 探してカメラで追う / "
         "keep: 距離を保つ / follow: 追う / map: 部屋を撮る",
     )
+    r.add_argument("--camera-file", help="カメラの代わりにこの JPEG を流す（試験用）")
     r.add_argument("--no-buttons", action="store_true", help="USR ボタンと LED を使わない")
     r.add_argument("--max-speed", type=float, help="picarx の速さの上限（0..100）")
     r.add_argument("--search-drive", action="store_true", help="探すときに車体も動かす")

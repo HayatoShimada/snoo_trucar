@@ -42,3 +42,22 @@ class Camera:
     def close(self) -> None:
         self.cam.stop()
         self.cam.close()
+
+
+class FileCamera:
+    """カメラの代わりに画像ファイルを fps で流す（カメラの無いときに、サーバーとハードを通しで試す）"""
+
+    def __init__(self, cfg: CameraConfig, path: str):
+        from pathlib import Path
+
+        self.jpeg = Path(path).read_bytes()
+        self.period = 1.0 / cfg.fps
+        self._next = time.monotonic()
+
+    def grab(self) -> tuple[int, bytes]:
+        self._next += self.period
+        time.sleep(max(0.0, self._next - time.monotonic()))
+        return time.monotonic_ns(), self.jpeg
+
+    def close(self) -> None:
+        pass
