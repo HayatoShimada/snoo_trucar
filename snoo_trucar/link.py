@@ -128,6 +128,13 @@ class Link:
         self.pose_fn = None
         # 返事に clear_cm の欄か clear_skip があったら呼ぶ（reply）。explore の記録に残して、超音波と比べるため
         self.on_clear = None
+        # 今の行動を返す関数。待機（idle）のときは cfg.server.idle_fps でしか送らない
+        self.mode_fn = None
+
+    def min_interval_ns(self) -> int:
+        if self.mode_fn is not None and self.mode_fn() == "idle" and self.cfg.server.idle_fps > 0:
+            return int(1e9 / self.cfg.server.idle_fps)
+        return 0
         self._frames: dict[int, bytes] = {}
         self._last_seen_save = 0
 
@@ -235,6 +242,7 @@ class Link:
 
 
 def camera_loop(camera, link: Link, stop: threading.Event, on_frame=None) -> None:
+    last_sent = 0
     while not stop.is_set():
         t_ns, jpeg = camera.grab()
         if link.trace is not None:
@@ -244,5 +252,9 @@ def camera_loop(camera, link: Link, stop: threading.Event, on_frame=None) -> Non
                 link.trace.mark(t_ns, "encoded", t_encoded)
         if on_frame is not None:
             on_frame(t_ns, jpeg)
-        if link.can_send(time.monotonic_ns()):
+        now = time.monotonic_ns()
+        if now - last_sent < link.min_interval_ns():
+            continue  # 待機中は送る数を減らす（サーバーの GPU の電力）
+        if link.can_send(now):
+            last_sent = now
             link.send(t_ns, jpeg)

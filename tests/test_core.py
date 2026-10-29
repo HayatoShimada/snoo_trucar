@@ -726,3 +726,37 @@ def test_explore_passes_low_obstacles():
     c2.step(est, S, dt, 200.0)
     c2.set_clear(1, 20.0, S)
     assert c2.step(est, S, dt, 40.0).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear"
+
+
+def test_link_sends_fewer_frames_while_idle():
+    import threading
+    from types import SimpleNamespace
+
+    from snoo_trucar.link import camera_loop
+
+    cfg = Config()
+    sent, mode = [], ["idle"]
+    stop = threading.Event()
+    t = [0]
+
+    class Cam:
+        def grab(self):
+            t[0] += 16_666_667
+            if t[0] > 4_000_000_000:
+                stop.set()
+            return t[0], b"j"
+
+    link = SimpleNamespace(trace=None, can_send=lambda now: True, send=lambda tn, j: sent.append(tn),
+                           min_interval_ns=lambda: int(1e9 / cfg.server.idle_fps) if mode[0] == "idle" else 0)
+    import snoo_trucar.link as L
+
+    real = L.time.monotonic_ns
+    L.time.monotonic_ns = lambda: t[0]
+    try:
+        camera_loop(Cam(), link, stop)
+        idle_n = len(sent)
+        sent.clear(); t[0] = 0; stop.clear(); mode[0] = "watch"
+        camera_loop(Cam(), link, stop)
+    finally:
+        L.time.monotonic_ns = real
+    assert 18 <= idle_n <= 22 and len(sent) >= 230  # 4 s: 待機は 5 fps、行動中は 60 fps

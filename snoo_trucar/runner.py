@@ -119,6 +119,7 @@ class Runner:
                 return (0.0, 0.0, 0.0, 0.0) if v is None else (v[1], v[2], v[3], v[4])
 
             self.link.pose_fn = pose
+            self.link.mode_fn = self.current_mode
 
             def on_clear(reply):
                 if recorder.dir is not None:

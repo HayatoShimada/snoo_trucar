@@ -55,6 +55,9 @@ class ServerConfig:
     reply_timeout_s: float = 0.5
     # 画像に撮った時刻の指令を付ける版 2（SNO2）で送る（サーバーは 2026-10-29 19:52 から読める）
     header_v2: bool = True
+    # 待機（idle、ボタン待ち）のときに送るフレーム数/s。サーバーの GPU の仕事はフレーム数に比例するので、
+    # 待機中は減らして電力を抑える（2026-10-29、ユーザーの希望）。行動を選んだらすぐ全部（60 fps）送る
+    idle_fps: float = 5.0
     # 探索の地図のサーバー（撮った分を送ると、次の 1 歩を返す。docs/PROTOCOL.md）
     map_url: str = "http://192.168.0.248:8720/v1/snoo/map/station"
     map_timeout_s: float = 20.0
