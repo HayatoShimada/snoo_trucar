@@ -27,9 +27,12 @@ def _sample(img: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
     return (a * (1 - fu) + b * fu) * (1 - fv) + (c * (1 - fu) + d * fu) * fv
 
 
-def build(scan_dir: Path, cam: CameraConfig, px_per_deg: float = 8.0, tilt_offset_deg: float = 0.0,
+def build(scan_dir: Path, cam: CameraConfig, px_per_deg: float = 8.0, tilt_offset_deg: float | None = None,
           pan_gain: float = 1.0) -> tuple[Image.Image, dict]:
     scan = json.loads((scan_dir / "scan.json").read_text())
+    if tilt_offset_deg is None:
+        # 版 1 はチルトの較正前（指令 0° で実際は +26.5°、home-linux の VGGT で測った）
+        tilt_offset_deg = scan.get("tilt_offset_deg", 26.5 if scan.get("schema_version", 1) < 2 else 0.0)
     # チルトのサーボのずれ（指令 0° のとき実際は上を向いている分）を足す
     # パンは指令より少なく回る（pan_gain 倍）
     frames = [dict(f, pan_deg=f["pan_deg"] * pan_gain, tilt_deg=f["tilt_deg"] + tilt_offset_deg)

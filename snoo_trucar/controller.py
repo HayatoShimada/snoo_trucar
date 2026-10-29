@@ -24,8 +24,10 @@ STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", M
 # map: 部屋を撮る
 MODES = ("idle", "watch", "keep", "follow", "map")
 MAP_PANS = (-35.0, -25.0, -15.0, -5.0, 5.0, 15.0, 25.0, 35.0)
-MAP_TILTS = (0.0, 25.0)
-MAP_HOLD_S = 1.0
+# チルトは picar-x.conf の較正（picarx_cam_tilt_servo = 26.5）で 0° が水平。床・壁・家具の高さを撮る
+MAP_TILTS = (-15.0, 0.0, 15.0)
+# パンを 10° 回すのに要る時間より長く。1.0 s では回りきる前に撮っていた（2026-10-29、VGGT で 0.88 倍）
+MAP_HOLD_S = 1.6
 
 
 @dataclass

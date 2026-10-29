@@ -9,7 +9,7 @@ import json
 import time
 from pathlib import Path
 
-SETTLE_S = 0.6  # 向きを変えてから撮るまで待つ（サーボが止まり、ぶれが収まるまで）
+SETTLE_S = 1.2  # 向きを変えてから撮るまで待つ（サーボが止まり、ぶれが収まるまで）
 
 
 class MapRecorder:
@@ -50,7 +50,9 @@ class MapRecorder:
     def finish(self) -> None:
         if self.dir is None:
             return
-        scan = {"schema_version": 1, "camera": "picarx-ov5647", "frames": self.entries}
+        # 2: チルトを較正した後（指令 0° が水平）。1 は指令 0° で実際は約 +26.5°
+        scan = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
+                "frames": self.entries}  # fmt: skip
         (self.dir / "scan.json").write_text(json.dumps(scan, ensure_ascii=False, indent=1))
         print(f"マッピング終了: {len(self.entries)} 枚 → {self.dir}", flush=True)
         self.dir = None

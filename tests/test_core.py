@@ -163,7 +163,7 @@ def test_map_recorder(tmp_path, monkeypatch):
     cmd = [0.0] * 15
     for index in (0, 1):
         cmd[13], cmd[3] = index, -35.0 + 10 * index
-        for _ in range(10):
+        for _ in range(16):  # 1.6 s（MAP_HOLD_S）
             rec.offer(1, b"jpeg", cmd, 50.0)
             clock[0] += 0.1
     cmd[13] = -1

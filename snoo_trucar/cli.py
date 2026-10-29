@@ -129,8 +129,9 @@ def main(argv=None) -> None:
     m = sub.add_parser("panorama", help="map で撮った画像を 1 枚のパノラマにする")
     m.add_argument("dir", nargs="?", help="map_* のディレクトリ（既定は一番新しいもの）")
     m.add_argument("--px-per-deg", type=float, default=8.0)
-    # 2026-10-29 に home-linux の VGGT で測った値（指令 0° のチルトは実際 +26.5°、パンは指令の 0.96 倍）
-    m.add_argument("--tilt-offset", type=float, default=26.5, help="チルトのずれ（度）")
+    # 2026-10-29 に home-linux の VGGT で測った値（パンは指令の 0.96 倍）
+    m.add_argument("--tilt-offset", type=float, default=None,
+                   help="チルトのずれ（度）。既定は scan.json の値（較正前の版 1 は 26.5）")
     m.add_argument("--pan-gain", type=float, default=0.96, help="実際のパン / 指令のパン")
     m.set_defaults(func=_panorama)
 
