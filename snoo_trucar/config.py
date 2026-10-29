@@ -114,6 +114,14 @@ class ControlConfig:
     search_pan_deg: float = 35.0
     search_period_s: float = 6.0
     search_tilt_deg: float = 0.0
+    # explore（部屋を動きながら撮る）。止まって撮る → explore_step_cm 進む、を繰り返す。
+    # 超音波で前が explore_clear_cm より近ければ、explore_turn_s だけハンドルを切って下がる
+    explore_speed: float = 15.0
+    explore_step_cm: float = 40.0
+    explore_clear_cm: float = 50.0
+    explore_turn_s: float = 1.5
+    explore_max_s: float = 600.0
+    explore_snoo_near_cm: float = 150.0  # snoo がこれより近くに見えたら止まって見守る
     # snoo を怖がらせない決まり（guard.py）。設定ファイルでは [control.guard]
     guard: GuardConfig = field(default_factory=GuardConfig)
 

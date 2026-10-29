@@ -1,10 +1,11 @@
+import dataclasses
 import math
 
 import pytest
 
 from snoo_trucar.buttons import ClickCounter, event_to_mode
 from snoo_trucar.config import CarConfig, ControlConfig, Config
-from snoo_trucar.controller import IDLE, MAP, MAP_HOLD_S, MAP_PANS, MAP_TILTS, SEARCH, TRACK, Controller
+from snoo_trucar.controller import MODES, IDLE, MAP, MAP_HOLD_S, MAP_PANS, MAP_TILTS, SEARCH, TRACK, Controller
 from snoo_trucar.estimator import Detection, TargetEstimator
 from snoo_trucar.mapping import MapRecorder
 from snoo_trucar.protocol import make_reply, pack_frame, parse_reply, pick_snoo, unpack_frame
@@ -161,12 +162,13 @@ def test_map_recorder(tmp_path, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr("snoo_trucar.mapping.time.monotonic", lambda: clock[0])
     cmd = [0.0] * 15
+    cmd[14] = MODES.index("map")
     for index in (0, 1):
         cmd[13], cmd[3] = index, -35.0 + 10 * index
         for _ in range(16):  # 1.6 s（MAP_HOLD_S）
             rec.offer(1, b"jpeg", cmd, 50.0)
             clock[0] += 0.1
-    cmd[13] = -1
+    cmd[13], cmd[14] = -1, MODES.index("idle")
     rec.offer(1, b"jpeg", cmd, None)
     (d,) = tmp_path.iterdir()
     import json
@@ -430,3 +432,64 @@ def test_play_stress_in_reply():
     assert parse_reply(make_reply(1, 2, 3.0, [det])).boxes[0].stress == 0.7
     det["play"] = None
     assert parse_reply(make_reply(1, 2, 3.0, [det])).boxes[0].stress is None
+
+
+def test_explore_scans_drives_and_turns():
+    from snoo_trucar.controller import DRIVE_INDEX, EXPLORE, EXPLORE_PANS, EXPLORE_TILTS
+
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    dt = 0.01
+    t = [0.0]
+
+    def run(seconds, us):
+        out = []
+        for _ in range(int(seconds / dt)):
+            t[0] += dt
+            out.append(dataclasses.replace(c.step(est, S + int(t[0] * S), dt, us)))  # step は同じものを返す
+        return out
+
+    n_poses = len(EXPLORE_PANS) * len(EXPLORE_TILTS)
+    cmds = run(n_poses * MAP_HOLD_S - 0.05, 200.0)
+    assert all(x.state == EXPLORE and x.speed == 0 for x in cmds)  # 止まって撮る
+    assert {x.scan_index for x in cmds} == set(range(n_poses))
+    cmds = run(0.5, 200.0)
+    assert cmds[-1].speed > 0 and cmds[-1].scan_index == DRIVE_INDEX  # 前が空いていれば進む
+    # 前が塞がった → ハンドルを切って下がる
+    x = run(0.1, 30.0)[-1]
+    assert x.speed < 0 and abs(x.steer) == c.car.steer_max
+    cmds = run(ctl.explore_turn_s + 0.1, 30.0)
+    assert cmds[-1].speed == 0 and cmds[-1].scan_index == n_poses  # 次の場所で撮り始める
+    # 超音波がずっと測れなければ、前にも後ろにも動かない
+    cmds = run(3 * n_poses * MAP_HOLD_S, None)
+    assert all(x.speed == 0 for x in cmds)
+    # snoo が遠くにいても探索は続ける。近くに見えたら止まってカメラで追うだけ
+    _seen(est, S + int(t[0] * S), 10.0, 300.0)
+    assert c.step(est, S + int(t[0] * S), dt, 200.0).state == EXPLORE
+    _seen(est, S + int(t[0] * S), 10.0, 100.0)
+    x = c.step(est, S + int(t[0] * S), dt, 200.0)
+    assert x.state == TRACK and x.speed == 0 and c.mode == "explore"
+
+
+def test_map_recorder_explore_records_while_driving(tmp_path, monkeypatch):
+    from snoo_trucar.controller import DRIVE_INDEX
+
+    rec = MapRecorder(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr("snoo_trucar.mapping.time.monotonic", lambda: clock[0])
+    cmd = [0.0] * 15
+    cmd[14], cmd[13], cmd[2] = MODES.index("explore"), DRIVE_INDEX, 15.0
+    for _ in range(20):  # 1 s 走る → 5 枚
+        rec.offer(1, b"jpeg", cmd, 120.0)
+        clock[0] += 0.05
+    cmd[13] = -1  # snoo を見ている間は撮らないが、終えない
+    rec.offer(1, b"jpeg", cmd, 120.0)
+    assert rec.dir is not None
+    cmd[14] = MODES.index("idle")
+    rec.offer(1, b"jpeg", cmd, None)
+    (d,) = tmp_path.iterdir()
+    import json
+
+    scan = json.loads((d / "scan.json").read_text())
+    assert d.name.startswith("explore_") and scan["mode"] == "explore"
+    assert len(scan["frames"]) == 5 and all(f["moving"] and f["speed"] == 15.0 for f in scan["frames"])

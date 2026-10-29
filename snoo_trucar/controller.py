@@ -7,6 +7,10 @@
 - IDLE: 待機（mode = idle）。止まってカメラを正面に戻す
 - MAP: 部屋を撮る（mode = map）。その場でカメラを決まった向きに順に向け、各向きで止まる。
   撮って保存するのはメインプロセス（scan_index が変わって落ち着いたら 1 枚）。一巡したら IDLE に戻る
+- EXPLORE: 部屋を動きながら撮る（mode = explore）。止まって首を振って撮る → 超音波で前が空いていれば
+  explore_step_cm 進む（その間も撮る）→ 塞がっていれば、ハンドルを切って下がって向きを変える、を繰り返す。
+  超音波が測れない（-1）ときは前に進まない。snoo が explore_snoo_near_cm より近くに見えたら、
+  止まってカメラで追うだけにする（臆病なので）
 """
 
 from __future__ import annotations
@@ -18,16 +22,22 @@ from .config import CarConfig, ControlConfig
 from .estimator import TargetEstimator
 from .guard import OK, Guard
 
-SEARCH, TRACK, COAST, IDLE, MAP = 0, 1, 2, 3, 4
-STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", MAP: "MAP"}
+SEARCH, TRACK, COAST, IDLE, MAP, EXPLORE = 0, 1, 2, 3, 4, 5
+STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", MAP: "MAP",
+               EXPLORE: "EXPLORE"}  # fmt: skip
 # idle: 待機 / watch: 探してカメラで追う / keep: 距離を保つ（近づく・離れる）/ follow: 追いかける /
-# map: 部屋を撮る
-MODES = ("idle", "watch", "keep", "follow", "map")
+# map: 部屋を撮る / explore: 部屋を動きながら撮る（共有メモリでは番号なので、足すときは後ろに）
+MODES = ("idle", "watch", "keep", "follow", "map", "explore")
 MAP_PANS = (-35.0, -25.0, -15.0, -5.0, 5.0, 15.0, 25.0, 35.0)
 # チルトは picar-x.conf の較正（picarx_cam_tilt_servo = 26.5）で 0° が水平。床・壁・家具の高さを撮る
 MAP_TILTS = (-15.0, 0.0, 15.0)
 # パンを 10° 回すのに要る時間より長く。1.0 s では回りきる前に撮っていた（2026-10-29、VGGT で 0.88 倍）
 MAP_HOLD_S = 1.6
+# explore で止まるたびに撮る向き（間取りには水平とやや下が要る）
+EXPLORE_PANS = (-30.0, -15.0, 0.0, 15.0, 30.0)
+EXPLORE_TILTS = (-15.0, 0.0)
+EXPLORE_US_FRESH_S = 5.0  # 超音波がこの間に 1 度も測れていなければ、下がって向きを変えることもしない
+DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
 
 
 @dataclass
@@ -37,7 +47,7 @@ class Command:
     pan: float = 0.0
     tilt: float = 0.0
     state: int = SEARCH
-    scan_index: int = -1  # MAP のとき、今どの向きか
+    scan_index: int = -1  # MAP / EXPLORE のとき、今どの向きか（通し番号）。走っている間は DRIVE_INDEX
     guard: int = OK  # 安全の層の状態（guard.py）
 
 
@@ -65,6 +75,11 @@ class Controller:
         self._search_t = 0.0
         self._search_turns = 0
         self._arc_left = 0.0
+        self._ex_phase, self._ex_t, self._ex_stop = "scan", 0.0, 0  # explore の段階・経過・止まった回数
+        self._ex_total = 0.0
+        self._ex_moved = 0.0
+        self._ex_turn_dir = 1.0
+        self._ex_us_at = -1e9  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
     def observe_stress(self, stress: float | None) -> None:
@@ -78,6 +93,8 @@ class Controller:
             self._map_t = 0.0
             self._search_t = 0.0
             self._arc_left = 0.0
+            self._ex_phase, self._ex_t, self._ex_stop = "scan", 0.0, 0
+            self._ex_total = 0.0
 
     def step(self, est: TargetEstimator, now_ns: int, dt: float, ultrasonic_cm: float | None):
         ctl, car, cmd = self.ctl, self.car, self.cmd
@@ -95,6 +112,11 @@ class Controller:
             state = SEARCH
             if est.valid:
                 est.forget()
+        if self.mode == "explore":
+            # snoo が近いときだけ止まって見守る。遠くにいるなら探索を続ける
+            far = state != SEARCH and est.dist.x[0] > ctl.explore_snoo_near_cm
+            if state == SEARCH or far:
+                state = EXPLORE
         if state == TRACK and cmd.state == SEARCH:
             self._search_t = 0.0
             self._arc_left = 0.0
@@ -108,6 +130,10 @@ class Controller:
                 state = IDLE
         elif state == SEARCH:
             pan_goal, tilt_goal, steer, speed = self._search(dt)
+        elif state == EXPLORE:
+            pan_goal, tilt_goal, steer, speed = self._explore(dt, ultrasonic_cm)
+            if self.mode == "idle":  # 時間切れ
+                state = IDLE
         else:
             # 書いてから効くまでの遅れ（0 次ホールドとサーボ）の分だけ先を狙う。
             # 方位は snoo の動きと車体の回転の両方で変わる
@@ -206,6 +232,50 @@ class Controller:
             self._search_turns += 1
             self._arc_left = 1.0
         return pan, ctl.search_tilt_deg, steer, speed
+
+    def _explore(self, dt: float, us_cm: float | None):
+        ctl, car = self.ctl, self.car
+        self._ex_total += dt
+        if self._ex_total >= ctl.explore_max_s:
+            self.set_mode("idle")
+            return 0.0, 0.0, 0.0, 0.0
+        self._ex_t += dt
+        if us_cm is not None:
+            self._ex_us_at = self._ex_total
+        if self._ex_phase == "scan":
+            poses = [(p, t) for t in EXPLORE_TILTS for p in EXPLORE_PANS]
+            i = int(self._ex_t / MAP_HOLD_S)
+            if i < len(poses):
+                self.cmd.scan_index = self._ex_stop * len(poses) + i
+                return (*poses[i], 0.0, 0.0)
+            self._ex_stop += 1
+            self._ex_t, self._ex_moved = 0.0, 0.0
+            clear = us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm
+            if clear:
+                self._ex_phase = "drive"
+            elif self._ex_total - self._ex_us_at <= EXPLORE_US_FRESH_S:
+                self._ex_phase = "turn"
+            else:
+                # 超音波がずっと測れない（壊れている・つながっていない）。前も見えないので動かず、その場で撮り直す
+                self._ex_phase = "scan"
+                return 0.0, 0.0, 0.0, 0.0
+        self.cmd.scan_index = DRIVE_INDEX
+        if self._ex_phase == "drive":
+            if us_cm is None or us_cm < ctl.explore_clear_cm:
+                self._ex_phase, self._ex_t = "turn", 0.0
+            else:
+                self._ex_moved += ctl.explore_speed * car.cm_s_per_speed * dt
+                if self._ex_moved >= ctl.explore_step_cm:
+                    self._ex_phase, self._ex_t = "scan", 0.0
+                    return 0.0, 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, ctl.explore_speed
+        if self._ex_phase == "turn":
+            # 前が塞がっている。ハンドルを切って下がり、向きを変える（後ろは見えないので短く）
+            if self._ex_t < ctl.explore_turn_s:
+                return 0.0, 0.0, self._ex_turn_dir * car.steer_max, -ctl.explore_speed
+            self._ex_turn_dir = -self._ex_turn_dir
+            self._ex_phase, self._ex_t = "scan", 0.0
+        return 0.0, 0.0, 0.0, 0.0
 
     def _map(self, dt: float):
         poses = [(p, t) for t in MAP_TILTS for p in MAP_PANS]
