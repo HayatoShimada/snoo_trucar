@@ -41,6 +41,12 @@ def clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
 
 
+def ego_yaw_rate(steer_deg: float, speed: float, car: CarConfig) -> float:
+    """指令（ハンドル・速さ）から出した車体の角速度（度/秒、右回りが +）。自転車モデル。"""
+    v = speed * car.cm_s_per_speed
+    return math.degrees(v / car.wheelbase_cm * math.tan(math.radians(steer_deg)))
+
+
 class Controller:
     PAN_RATE = 120.0  # 度/秒。サーボが追いつく速さに抑える
 
@@ -95,8 +101,9 @@ class Controller:
         elif state == SEARCH:
             pan_goal, tilt_goal, steer, speed = self._search(dt)
         else:
-            # 書いてから効くまでの遅れ（0 次ホールドとサーボ）の分だけ先を狙う
-            bearing = est.bearing.x[0] + est.bearing.x[1] * ctl.lead_s
+            # 書いてから効くまでの遅れ（0 次ホールドとサーボ）の分だけ先を狙う。
+            # 方位は snoo の動きと車体の回転の両方で変わる
+            bearing = est.bearing.x[0] + (est.bearing.x[1] - est.yaw_rate) * ctl.lead_s
             pan_goal = bearing
             tilt_goal = est.elev.x[0] + est.elev.x[1] * ctl.lead_s
             if state == TRACK and self.mode in ("keep", "follow"):
@@ -122,19 +129,47 @@ class Controller:
         return cmd
 
     def _approach(self, bearing: float, dist: float, ultrasonic_cm: float | None):
+        """距離のループ（速さ）と、車体の向きのループ（ハンドル）。
+
+        cascade（snoo_trucar#18）では、車体の向きは「首（方位）を 0° に戻す」ループとして
+        距離から切り離し、帯域を heading_hz に揃える。前輪で曲がる車は止まると
+        向きを変えられないので、距離が目標の内でも方位が turn_creep_deg を超えたら、
+        creep_speed でゆっくり進んで（近すぎれば下がって）向きを変える。
+        """
         ctl = self.ctl
         goal = ctl.follow_distance_cm if self.mode == "follow" else ctl.keep_distance_cm
         err = dist - goal
         if abs(err) < ctl.distance_deadband_cm:
-            return 0.0, 0.0
-        speed = ctl.speed_kp * (err - math.copysign(ctl.distance_deadband_cm, err))
+            speed = 0.0
+        else:
+            speed = ctl.speed_kp * (err - math.copysign(ctl.distance_deadband_cm, err))
         if self.mode == "follow":
             speed = max(speed, 0.0)  # 追いかけるときは下がらない
-        steer = ctl.steer_kp * bearing
-        if speed > 0:
+        if not ctl.cascade:
+            if speed == 0.0:
+                return 0.0, 0.0
+            steer = ctl.steer_kp * bearing
+            if speed > 0:
+                # 横にいるときは曲がることを優先して遅くする
+                speed *= max(0.3, math.cos(math.radians(min(abs(bearing), 90.0))))
+            else:
+                steer = -steer  # 下がるときは逆に切ると、車体が snoo の方を向く
+            return steer, speed
+        if abs(speed) < ctl.creep_speed and abs(bearing) > ctl.turn_creep_deg:
+            # 首だけでは追いきれない角度。向きを変えるために、ゆっくり動く
+            back = err < 0 and self.mode != "follow"
+            speed = -ctl.creep_speed if back else ctl.creep_speed
+        elif speed > 0:
             # 横にいるときは曲がることを優先して遅くする
             speed *= max(0.3, math.cos(math.radians(min(abs(bearing), 90.0))))
-        else:
+        v = abs(speed) * self.car.cm_s_per_speed
+        if v < 1e-6:
+            return 0.0, 0.0
+        # 車体の向きを heading_hz の帯域で方位に寄せる。
+        # 角速度 = 2π f × 方位 を、自転車モデルでハンドルの角度に直す
+        yaw_rate = 2 * math.pi * ctl.heading_hz * math.radians(bearing)
+        steer = math.degrees(math.atan(yaw_rate * self.car.wheelbase_cm / v))
+        if speed < 0:
             steer = -steer  # 下がるときは逆に切ると、車体が snoo の方を向く
         return steer, speed
 

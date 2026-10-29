@@ -306,3 +306,46 @@ def test_route_prefers_lan_and_falls_back_to_tailscale():
     del names["lan"]  # 家の外：LAN の名前が引けなければすぐ次へ
     r2 = Route(["lan", "ts"], 8710, 1.0, 30.0, resolve=resolve)
     assert r2.addr(0) == ("100.108.168.101", 8710)
+
+
+def test_estimator_does_not_mistake_turning_for_snoo_moving():
+    """車体が右へ 60°/s で回っても、止まっている snoo の速度は 0 のまま（snoo_trucar#17）"""
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    fx = 0.5 / math.tan(math.radians(53.5 / 2))
+    rate, lag = 60.0, 0.04
+    for k in range(0, 1001):  # 1 ms ごとに 1 秒
+        now = k * S // 1000
+        est.set_ego(rate)
+        est.predict_to(now)
+        est.record_pose(now, 0.0, 0.0)
+        if k % 17 == 0 and k / 1000 >= lag:
+            t = k / 1000 - lag
+            true_then = 10.0 - rate * t  # 撮った時の方位（右へ回るので左へずれる）
+            cx = 0.5 + fx * math.tan(math.radians(true_then))
+            est.measure(Detection(int(t * S), cx, 0.5, 0.2, 0.33, 0.9), now)
+    assert est.bearing.x[0] == pytest.approx(10.0 - rate * 1.0, abs=1.0)
+    assert est.bearing.x[1] == pytest.approx(0.0, abs=5.0)
+
+
+def test_controller_turns_the_body_even_inside_the_distance_band():
+    """距離が目標の内でも、首の角度が大きければゆっくり動いて車体の向きを変える（snoo_trucar#18）"""
+    from snoo_trucar.controller import ego_yaw_rate
+
+    controller, ctl = _controller("keep")
+    steer, speed = controller._approach(25.0, ctl.keep_distance_cm, None)
+    assert speed == ctl.creep_speed and steer > 0
+    # 右へ回る向きで、速さによらず帯域は heading_hz（角速度 = 2π f × 方位）
+    rate = ego_yaw_rate(steer, speed, controller.car)
+    want = math.degrees(2 * math.pi * ctl.heading_hz * math.radians(25.0))
+    assert rate == pytest.approx(want, rel=0.05)
+    # 正面なら止まったまま
+    assert controller._approach(2.0, ctl.keep_distance_cm, None) == (0.0, 0.0)
+
+
+def test_bench_keeps_track_of_a_circling_snoo():
+    from snoo_trucar.bench import run
+
+    r = run("turn", seed=0).summary()
+    assert r["見失った回数"] == 0
+    assert r["向きのずれ p95"] < 8.0
+    assert r["いちばん近づいた距離"] > 25.0

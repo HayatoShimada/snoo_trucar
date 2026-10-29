@@ -13,7 +13,7 @@ import os
 import time
 
 from .config import Config
-from .controller import MODES, Controller
+from .controller import MODES, Controller, ego_yaw_rate
 from .estimator import Detection, TargetEstimator
 from .shm import SeqBuffer
 
@@ -86,6 +86,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 used_capture, used_ns = int(v[0]), time.monotonic_ns()
 
             cmd = controller.step(est, now, dt, us_cm)
+            if ctl.ego_ff:
+                est.set_ego(ego_yaw_rate(cmd.steer, cmd.speed, cfg.car))
             est.record_pose(now, cmd.pan, cmd.tilt)
 
             since = est.since_seen_s(now)

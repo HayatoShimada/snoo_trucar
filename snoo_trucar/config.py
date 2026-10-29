@@ -85,13 +85,26 @@ class ControlConfig:
     # カメラ・ハンドルは、今の推定ではなく lead_s 秒後の予測に向ける。書き込みは 50 Hz の 0 次ホールド
     # （平均 10 ms 遅れ）、サーボの PWM も 50 Hz（平均 10 ms）、サーボが動き出すまで 10 ms ほど
     lead_s: float = 0.03
+    # 指令から出した車体の角速度を、推定に分かっている入力として入れる（snoo_trucar#17）
+    ego_ff: bool = True
     # 見失ってから予測だけで追う時間と、探し始めるまでの時間
     coast_s: float = 0.7
     lost_s: float = 2.0
     # 制御の利得
-    pan_kp: float = 6.0  # 1/s。カメラの向きをこの速さで目標に寄せる
-    steer_kp: float = 1.0  # 度/度
-    speed_kp: float = 0.4  # 速さ/cm
+    # 1/s。カメラの向きをこの速さで目標に寄せる（約 2 Hz）。bench で 6 → 12 にすると、横へ走る snoo への
+    # 向きのずれが RMS 3.5 → 2.7°。サーボの値が仮なので、#2 で測るまでは 20 にはしない
+    pan_kp: float = 12.0
+    steer_kp: float = 1.0  # 度/度（cascade = false のとき）
+    # 車体の向きのループ（snoo_trucar#18）。首（方位）を 0° に戻すように、この帯域で車体を回す。
+    # 首のループ（pan_kp、約 1 Hz）より十分遅くする。前輪で曲がる車は止まると向きを変えられないので、
+    # 距離が目標の内でも方位が turn_creep_deg を超えたら creep_speed でゆっくり動いて向きを変える
+    cascade: bool = True
+    heading_hz: float = 0.3
+    turn_creep_deg: float = 15.0
+    creep_speed: float = 12.0
+    # 速さ/cm（距離のループ。約 0.2 Hz）。bench の円を歩く snoo で、0.4 だと近づかれて見失い（最短 10 cm）、
+    # 1.2 なら見失わず最短 41 cm だった（箱の高さのぶれ 8% を入れて）
+    speed_kp: float = 1.2
     # 探すときのカメラの振り
     search_pan_deg: float = 35.0
     search_period_s: float = 6.0
@@ -118,6 +131,10 @@ class CarConfig:
     tilt_min: float = -35.0
     tilt_max: float = 35.0
     steer_max: float = 30.0
+    # 車体の動きの換算（自転車モデル）。速さ 1 あたりの cm/s と、前後の車輪の間（cm）。
+    # どちらも見積もりで、測っていない（snoo_trucar#8）
+    cm_s_per_speed: float = 1.0
+    wheelbase_cm: float = 9.5
 
 
 @dataclass
