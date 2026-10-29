@@ -3,6 +3,7 @@
   run          snoo を探して追う（--sim でハード・サーバーなしのシミュレーション）
   fake-server  検出サーバーの偽物（決まった位置に snoo がいると返す）
   probe        画像を 1 枚サーバーに送って返事を見る
+  panorama     map で撮った画像を 1 枚のパノラマにする
 """
 
 from __future__ import annotations
@@ -78,6 +79,18 @@ def _probe(args) -> None:
         print(f"#{i + 1}: rtt={rtt:.1f}ms {json.dumps(json.loads(data), ensure_ascii=False)}")
 
 
+def _panorama(args) -> None:
+    from .panorama import build, latest
+
+    cfg = config_mod.load(args.config)
+    scan_dir = Path(args.dir).expanduser() if args.dir else latest(Path(cfg.map_dir).expanduser())
+    pano, info = build(scan_dir, cfg.camera, args.px_per_deg, args.tilt_offset, args.pan_gain)
+    out = scan_dir / "panorama.jpg"
+    pano.save(out, quality=90)
+    print(f"{out}  {pano.size[0]}x{pano.size[1]}  方位 {info['yaw_deg'][0]:+.0f}..{info['yaw_deg'][1]:+.0f}°"
+          f"  仰角 {info['pitch_deg'][0]:+.0f}..{info['pitch_deg'][1]:+.0f}°  {info['frames']} 枚")
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="snoo_trucar")
     p.add_argument("--config", type=Path, default=None)
@@ -112,6 +125,14 @@ def main(argv=None) -> None:
     q.add_argument("--server", help="host:port（既定は設定の値）")
     q.add_argument("--count", type=int, default=5)
     q.set_defaults(func=_probe)
+
+    m = sub.add_parser("panorama", help="map で撮った画像を 1 枚のパノラマにする")
+    m.add_argument("dir", nargs="?", help="map_* のディレクトリ（既定は一番新しいもの）")
+    m.add_argument("--px-per-deg", type=float, default=8.0)
+    # 2026-10-29 に home-linux の VGGT で測った値（指令 0° のチルトは実際 +26.5°、パンは指令の 0.96 倍）
+    m.add_argument("--tilt-offset", type=float, default=26.5, help="チルトのずれ（度）")
+    m.add_argument("--pan-gain", type=float, default=0.96, help="実際のパン / 指令のパン")
+    m.set_defaults(func=_panorama)
 
     args = p.parse_args(argv)
     args.func(args)
