@@ -18,6 +18,7 @@ from pathlib import Path
 from .config import Config
 from .controller import MODES, STATE_NAMES
 from .shm import SeqBuffer
+from .trace import Trace
 
 CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古ければ止める
 
@@ -41,6 +42,7 @@ class Runner:
         self.link = None
         self.camera = None
         self.last_cmd = None
+        self.trace: Trace | None = None
 
     def run(self) -> None:
         cfg = self.cfg
@@ -86,7 +88,11 @@ class Runner:
                 camera = FileCamera(cfg.camera, self.camera_file)
             else:
                 camera = self.camera = Camera(cfg.camera)
-            self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser())
+            trace_path = None
+            if cfg.trace_dir:
+                trace_path = Path(cfg.trace_dir).expanduser() / time.strftime("trace_%Y%m%d_%H%M%S.jsonl")
+            self.trace = Trace(trace_path)
+            self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser(), self.trace)
             recorder = MapRecorder(Path(cfg.map_dir).expanduser())
 
             def on_frame(t_ns, jpeg):
@@ -120,6 +126,8 @@ class Runner:
                 camera.close()
             if self.link is not None:
                 self.link.close()
+            if self.trace is not None:
+                self.trace.close()
             for b in (meas, us, cmd, mode):
                 b.close()
 
@@ -135,22 +143,30 @@ class Runner:
         while not self.stop.is_set():
             t0 = time.monotonic()
             cm = car.read_ultrasonic()
+            if self.trace is not None:
+                self.trace.loop("超音波1回", (time.monotonic() - t0) * 1000)
             self.last_us = cm
             us.write((time.monotonic_ns(), cm if cm is not None else -1.0))
             fails = 0 if cm is not None else fails + 1
             # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける
-            wait = period if fails < 20 else 1.0
+            wait = period if fails < 20 else self.cfg.car.ultrasonic_retry_s
             time.sleep(max(0.0, wait - (time.monotonic() - t0)))
 
     def _actuate_loop(self, car, cmd: SeqBuffer) -> None:
         period = 1.0 / self.cfg.car.actuator_hz
         start = time.monotonic()
         nxt = start
-        last_print = 0.0
+        last_print = last_trace = 0.0
+        prev = None
+        applied_capture = 0
+        trace = self.trace
         while not self.stop.is_set():
             now = time.monotonic()
             if self.seconds is not None and now - start >= self.seconds:
                 break
+            if trace is not None and prev is not None:
+                trace.loop("書き込みの周期", (now - prev) * 1000)
+            prev = now
             r = cmd.read()
             if r is not None:
                 v = r[1]
@@ -160,9 +176,17 @@ class Runner:
                     car.apply(v[1], v[2], v[3], v[4])
                     self.last_cmd = v
                     self._record(now - start, v)
+                    # 新しい検出を使ったコマンドを初めて書いた
+                    if trace is not None and int(v[15]) and int(v[15]) != applied_capture:
+                        applied_capture = int(v[15])
+                        trace.mark(applied_capture, "used", int(v[16]))
+                        trace.mark(applied_capture, "applied")
             if not self.quiet and now - last_print >= 0.5 and self.last_cmd is not None:
                 last_print = now
                 print(self._status(self.last_cmd), flush=True)
+            if not self.quiet and trace is not None and now - last_trace >= 10.0:
+                last_trace = now
+                print(trace.summary(), flush=True)
             nxt += period
             time.sleep(max(0.0, nxt - time.monotonic()))
 

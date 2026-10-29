@@ -55,9 +55,10 @@ class Confirm:
 class Link:
     SEEN_GAP_NS = 10_000_000_000  # 見つけたときの写真は 10 秒に 1 枚まで
 
-    def __init__(self, cfg: Config, meas: SeqBuffer, seen_dir: Path | None = None):
+    def __init__(self, cfg: Config, meas: SeqBuffer, seen_dir: Path | None = None, trace=None):
         self.cfg = cfg
         self.meas = meas
+        self.trace = trace  # trace.Trace（無ければ測らない）
         self.addr = (socket.gethostbyname(cfg.server.host), cfg.server.port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
@@ -93,6 +94,8 @@ class Link:
             self.stats.sent += 1
             self.stats.jpeg_bytes = len(jpeg)
         self.sock.sendto(data, self.addr)
+        if self.trace is not None:
+            self.trace.mark(t_capture_ns, "sent")
 
     def receive_forever(self, stop: threading.Event) -> None:
         ctl = self.cfg.control
@@ -111,6 +114,8 @@ class Link:
                 reply = parse_reply(data)
             except (ValueError, KeyError):
                 continue
+            if self.trace is not None:
+                self.trace.mark(reply.t_capture_ns, "reply", now)
             with self._lock:
                 st = self.stats
                 sent_ns = st._in_flight.pop(reply.seq, None)
@@ -123,6 +128,10 @@ class Link:
                 st.last_infer_ms = reply.infer_ms
                 if sent_ns is not None:
                     st.last_rtt_ms = (now - sent_ns) / 1e6
+                    if self.trace is not None:
+                        # 往復のうちサーバーの外（通信・tailscale・受信スレッドが起きるまで）
+                        self.trace.loop("往復のうちサーバー", reply.infer_ms)
+                        self.trace.loop("往復のうち外", st.last_rtt_ms - reply.infer_ms)
                 if now - reply.t_capture_ns > timeout_ns:
                     st.dropped += 1
                     continue
@@ -134,6 +143,8 @@ class Link:
                 self.stats.snoo_hits += 1
                 if self.confirm.hit(reply.t_capture_ns):
                     self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score))
+                    if self.trace is not None:
+                        self.trace.mark(reply.t_capture_ns, "meas")
                     if self.confirm.started and jpeg is not None:
                         self._save_seen(now, jpeg, reply, box)
 
@@ -155,6 +166,11 @@ class Link:
 def camera_loop(camera, link: Link, stop: threading.Event, on_frame=None) -> None:
     while not stop.is_set():
         t_ns, jpeg = camera.grab()
+        if link.trace is not None:
+            t_grab, t_encoded = getattr(camera, "last_times", (0, 0))
+            link.trace.mark(t_ns, "grab", t_grab or None)
+            if t_encoded:
+                link.trace.mark(t_ns, "encoded", t_encoded)
         if on_frame is not None:
             on_frame(t_ns, jpeg)
         if link.can_send(time.monotonic_ns()):

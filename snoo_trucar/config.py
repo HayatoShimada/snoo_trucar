@@ -97,11 +97,17 @@ class ControlConfig:
 class CarConfig:
     # picar-x の較正値（servo のずれなど）。picarx が自分で読み書きする
     picarx_config: str = str(Path.home() / ".config" / "snoo_trucar" / "picar-x.conf")
-    # サーボの PWM（robot_hat の Servo.FREQ）と同じ 50 Hz。速くしても、サーボは 20 ms ごとにしか新しい角度を受け取らない。
-    # I2C の書き込みは 1 回 0.45 ms で、全部（ハンドル・パン・チルト・モーター 2 つ）書いても 3 ms ほど
-    actuator_hz: float = 50.0
+    # サーボの PWM（robot_hat の Servo.FREQ）は 50 Hz で、20 ms ごとにしか新しい角度を受け取らない。
+    # ただ書き込みも 50 Hz だと、PWM と揃っていないので 0 次ホールドが 2 段重なる。200 Hz にすると
+    # 検出を使ってから I2C に書くまでが p50 8.9 → 2.4 ms、p95 16 → 4.4 ms（2026-10-29 に実測）。
+    # 値が変わったときだけ書く（hal.Car.apply）。I2C は 1 回 0.45 ms
+    actuator_hz: float = 200.0
     # 超音波（HC-SR04 型）は、前の反響が消えるまで 60 ms あけるのがよいとされるので 15 Hz
     ultrasonic_hz: float = 15.0
+    # 測れない（つながっていない・前に何も無い）ことが続いたら、この間隔でだけ試す。
+    # 1 回に 21 ms ほど Python で待ち続け（GIL を持ったまま）、その間はカメラ・送信・書き込みが止まる。
+    # 1 s ごとだと撮影→返事の最大が 64 ms、30 s ごとなら 55 ms（2026-10-29 に実測）
+    ultrasonic_retry_s: float = 30.0
     pan_min: float = -35.0
     pan_max: float = 35.0
     tilt_min: float = -35.0
@@ -118,6 +124,8 @@ class Config:
     # map で撮った画像の置き場所（map_日時/ に画像と scan.json）
     map_dir: str = "~/captures/snoo_map"
     seen_dir: str = "~/captures/snoo_seen"  # 追い始めたときの画像と箱
+    # フレームごとの区間の時刻（trace.py）を JSON Lines で残すディレクトリ。空なら残さない（集計は出す）
+    trace_dir: str = ""
 
 
 def _merge(obj, values: dict, where: str):

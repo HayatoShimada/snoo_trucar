@@ -24,8 +24,9 @@ US_N = 2
 # mode: controller.MODES の番号
 MODE_N = 1
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
-#      loop_hz, jitter_p99_us, overruns, scan_index, mode
-CMD_N = 15
+#      loop_hz, jitter_p99_us, overruns, scan_index, mode,
+#      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）
+CMD_N = 17
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
 
@@ -46,6 +47,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
     last_meas = last_us = last_mode = 0
     us_cm: float | None = None
     us_t = 0
+    used_capture = used_ns = 0
     out_vals = [0.0] * CMD_N
     # 統計（1 秒ごと）
     n = overruns = 0
@@ -81,6 +83,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 last_meas = r[0]
                 v = r[1]
                 est.measure(Detection(int(v[0]), v[1], v[2], v[3], v[4], v[5]), now, us_cm)
+                used_capture, used_ns = int(v[0]), time.monotonic_ns()
 
             cmd = controller.step(est, now, dt, us_cm)
             est.record_pose(now, cmd.pan, cmd.tilt)
@@ -89,7 +92,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             out_vals[:] = (
                 now, cmd.steer, cmd.speed, cmd.pan, cmd.tilt, cmd.state, float(est.valid),
                 est.bearing.x[0], est.dist.x[0], min(since, 1e6), loop_hz, p99, overruns,
-                cmd.scan_index, MODES.index(controller.mode),
+                cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns,
             )  # fmt: skip
             out.write(out_vals)
 

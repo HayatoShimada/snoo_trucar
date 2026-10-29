@@ -238,3 +238,47 @@ def test_controller_leads_the_target_by_lead_s():
     for _ in range(2000):  # カメラが目標に落ち着くまで回す
         cmd = controller.step(est, S, 0.001, None)
     assert cmd.pan == pytest.approx(goal, abs=0.1)
+
+
+def test_trace_sections_from_capture_to_applied(tmp_path):
+    import json
+
+    from snoo_trucar.trace import Trace
+
+    ms = 1_000_000
+    trace = Trace(tmp_path / "t.jsonl")
+    t = 10 * S
+    for point, at in (("grab", 19), ("encoded", 24), ("sent", 25), ("reply", 42), ("meas", 43),
+                      ("used", 44), ("applied", 60)):  # fmt: skip
+        trace.mark(t, point, t + at * ms)
+    trace.mark(t, "reply", t + 99 * ms)  # 閉じたフレームには足さない
+    line = trace.summary()
+    assert "カメラ 19.0/19.0/19.0" in line
+    assert "往復 17.0/17.0/17.0" in line
+    assert "撮影→書き込み 60.0/60.0/60.0" in line
+    frame = json.loads((tmp_path / "t.jsonl").read_text())
+    assert frame["applied"] - frame["capture"] == 60 * ms
+    trace.close()
+
+
+def test_trace_closes_frames_that_never_reach_the_motors():
+    from snoo_trucar.trace import MAX_OPEN, Trace
+
+    trace = Trace()
+    for k in range(MAX_OPEN + 5):  # snoo が見えていないフレームは返事まで
+        trace.mark(k * S, "grab", k * S + 19_000_000)
+        trace.mark(k * S, "reply", k * S + 40_000_000)
+    line = trace.summary()
+    assert "撮影→返事 40.0/40.0/40.0" in line and "撮影→書き込み" not in line
+
+
+def test_servo_step_shift_and_crossing():
+    import numpy as np
+
+    from snoo_trucar.servo_step import crossing, shift_px
+
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(120, 160)).astype(np.float32)
+    b = np.roll(a, 7, axis=1)  # 右に 7 画素
+    assert shift_px(a, b) == pytest.approx(7.0, abs=0.3)
+    assert crossing([0.0, 10.0, 20.0], [0.0, 0.2, 1.0], 0.5) == pytest.approx(13.75)
