@@ -229,6 +229,7 @@ def test_sigterm_stops_the_motors(tmp_path):
         code = p.wait(timeout=10)
     finally:
         p.kill()
+        p.stdout.close()
     lines = log.read_text().split() if log.exists() else []
     assert code == 0 and "stop" in lines and lines[-1] == "returned"
 
