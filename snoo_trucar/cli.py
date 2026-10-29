@@ -36,14 +36,14 @@ def _run(args) -> int:
     if args.any_cat:
         cfg.control.require_snoo = False
     print(f"mode={cfg.control.mode} max_speed={cfg.control.max_speed} sim={args.sim}", flush=True)
-    from .runner import ControlDied
+    from .runner import ControlDied, ThreadDied
 
     try:
         Runner(cfg, sim=args.sim, seconds=args.seconds, buttons=not args.no_buttons,
                camera_file=args.camera_file).run()
     except KeyboardInterrupt:
         pass
-    except ControlDied as e:
+    except (ControlDied, ThreadDied) as e:
         print(f"{e}。止めて終わる", flush=True)
         return 1  # systemd の Restart=on-failure で起動し直す
     return 0

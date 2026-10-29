@@ -13,6 +13,7 @@ import time
 
 from .control_proc import PLAN_N
 from .controller import MAX_SEGMENTS, PLAN_DONE, PLAN_FALLBACK, PLAN_MOVE, STOP_REASONS
+from .errlog import ErrorLog
 
 
 class StationClient:
@@ -26,21 +27,26 @@ class StationClient:
         self.last = ""  # 状態の行に出す
 
     def run(self, stop: threading.Event) -> None:
+        errors = ErrorLog("station")
         while not stop.is_set():
-            v = self.runner.last_cmd
-            rec = self.runner.recorder
-            if v is not None and rec is not None and rec.dir is not None:
-                if self._session != rec.dir.name:
-                    self._session, self._posted, self._last_move = rec.dir.name, -1, None
-                k = int(v[18])
-                if k >= 0 and k != self._posted:
-                    self._posted = k
-                    self._post(k, v, rec)
+            try:
+                self._once()
+            except Exception as e:  # 送れなかった station は、制御プロセスが 25 s 待って Pi だけで決める
+                errors(e)
             stop.wait(0.1)
 
-    def _post(self, k: int, v, rec) -> None:
-        import requests
+    def _once(self) -> None:
+        v = self.runner.last_cmd
+        rec = self.runner.recorder
+        if v is not None and rec is not None and rec.dir is not None:
+            if self._session != rec.dir.name:
+                self._session, self._posted, self._last_move = rec.dir.name, -1, None
+            k = int(v[18])
+            if k >= 0 and k != self._posted:
+                self._posted = k
+                self._post(k, v, rec)
 
+    def _post(self, k: int, v, rec) -> None:
         entries = [e for e in list(rec.entries) if e.get("station") == k]
         prev = None
         if k > 0:
@@ -65,6 +71,8 @@ class StationClient:
         t0 = time.monotonic()
         plan = (k, PLAN_FALLBACK) + (0.0,) * (PLAN_N - 2)
         try:
+            import requests  # 無ければ Pi だけで決める（下の except）
+
             files = [("images", (e["file"], (rec.dir / e["file"]).read_bytes(), "image/jpeg"))
                      for e in entries]  # fmt: skip
             r = requests.post(self.cfg.server.map_url, data={"meta": json.dumps(meta)}, files=files,

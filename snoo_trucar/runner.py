@@ -12,12 +12,14 @@ import os
 import signal
 import threading
 import time
+import traceback
 
 from . import control_proc
 from pathlib import Path
 
 from .config import Config
 from .controller import MODES, STATE_NAMES
+from .errlog import ErrorLog
 from .guard import GUARD_NAMES, OK
 from .shm import SeqBuffer
 from .trace import Trace
@@ -27,6 +29,11 @@ CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古け�
 
 class ControlDied(RuntimeError):
     """制御プロセスが死んだ。止めてから、0 でない終了コードで抜ける（systemd が起動し直す）"""
+
+
+class ThreadDied(RuntimeError):
+    """メインプロセスのスレッド（受信・カメラ・超音波・電池・station など）が死んだ。ControlDied と同じく
+    止めて抜ける。超音波や clear_cm が来なくなると、止める仕組みも一緒に外れるので"""
 BATTERY_NONE_V = 1.0  # これより低ければ電池が入っていない・スイッチが切れている
 
 
@@ -66,6 +73,7 @@ class Runner:
         self.recorder = None
         self.station = None
         self.battery_v: float | None = None
+        self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
 
     def run(self) -> None:
         cfg = self.cfg
@@ -107,7 +115,7 @@ class Runner:
 
             car = FakeCar(cfg.car)
             self.world = SimWorld(cfg, car, meas, seed=self.seed)
-            threads.append(threading.Thread(target=self.world.run, args=(self.stop,)))
+            threads.append(self._thread("シミュレーション", self.world.run, self.stop))
         else:
             from .camera import Camera, FileCamera
             from .hal import Car
@@ -155,21 +163,19 @@ class Runner:
                     self.motion.feed(t, shrink(gray), moving)
                 recorder.offer(t_ns, jpeg, self.last_cmd, self.last_us)
 
-            threads.append(threading.Thread(target=self.link.receive_forever, args=(self.stop,)))
-            threads.append(
-                threading.Thread(target=camera_loop, args=(camera, self.link, self.stop, on_frame))
-            )
+            threads.append(self._thread("受信", self.link.receive_forever, self.stop))
+            threads.append(self._thread("カメラ", camera_loop, camera, self.link, self.stop, on_frame))
             from .station import StationClient
 
             self.station = StationClient(self, plan)
-            threads.append(threading.Thread(target=self.station.run, args=(self.stop,)))
+            threads.append(self._thread("station", self.station.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
 
                 panel = Panel(self.set_mode, self.current_mode)
-                threads.append(threading.Thread(target=panel.run, args=(self.stop,)))
-        threads.append(threading.Thread(target=self._ultrasonic_loop, args=(car, us)))
-        threads.append(threading.Thread(target=self._battery_loop, args=(car,)))
+                threads.append(self._thread("ボタン", panel.run, self.stop))
+        threads.append(self._thread("超音波", self._ultrasonic_loop, car, us))
+        threads.append(self._thread("電池", self._battery_loop, car))
         for t in threads:
             t.daemon = True
             t.start()
@@ -197,6 +203,20 @@ class Runner:
             for b in (meas, us, cmd, mode, clear, plan):
                 b.close()
 
+    def _thread(self, name: str, target, *args) -> threading.Thread:
+        return threading.Thread(target=self._watched, args=(name, target, *args), name=name)
+
+    def _watched(self, name: str, target, *args) -> None:
+        """スレッドが例外で死んだ・stop の前に抜けたら、thread_died を立てる（書き込みのループが止める）"""
+        try:
+            target(*args)
+        except BaseException:
+            traceback.print_exc()
+            self.thread_died = name
+            return
+        if not self.stop.is_set():
+            self.thread_died = name
+
     def set_mode(self, mode: str) -> None:
         self.mode_buf.write((MODES.index(mode),))
 
@@ -206,9 +226,16 @@ class Runner:
     def _ultrasonic_loop(self, car, us: SeqBuffer) -> None:
         period = 1.0 / self.cfg.car.ultrasonic_hz
         fails = 0
+        errors = ErrorLog("超音波")
         while not self.stop.is_set():
             t0 = time.monotonic()
-            cm = car.read_ultrasonic()
+            try:
+                cm = car.read_ultrasonic()
+            except Exception as e:
+                # 読めなかった。書かずにおく（古くなると、制御プロセスは explore で前に進まない）
+                errors(e)
+                self.stop.wait(period)
+                continue
             if self.trace is not None:
                 self.trace.loop("超音波1回", (time.monotonic() - t0) * 1000)
             self.last_us = cm
@@ -228,8 +255,13 @@ class Runner:
 
     def _battery_loop(self, car) -> None:
         low_v = self.cfg.car.battery_low_v
+        errors = ErrorLog("電池")
         while not self.stop.is_set():
-            self.battery_v = car.read_battery()
+            try:
+                self.battery_v = car.read_battery()
+            except Exception as e:
+                errors(e)
+                self.battery_v = None  # 測れないときは止めない（battery_state）
             label, ok = battery_state(self.battery_v, low_v)
             if ok != self.battery[1] and not self.quiet:
                 print(label, flush=True)
@@ -252,6 +284,9 @@ class Runner:
             if trace is not None and prev is not None:
                 trace.loop("書き込みの周期", (now - prev) * 1000)
             prev = now
+            if self.thread_died is not None:
+                car.stop()
+                raise ThreadDied(f"スレッド（{self.thread_died}）が止まった")
             if proc is not None and not proc.is_alive():
                 car.stop()
                 raise ControlDied(f"制御プロセスが止まった（exitcode={proc.exitcode}）")

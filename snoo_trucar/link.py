@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import Config
+from .errlog import ErrorLog
 from .protocol import pack_frame, parse_reply, pick_snoo
 from .shm import SeqBuffer
 
@@ -132,6 +133,7 @@ class Link:
         self.mode_fn = None
         self._frames: dict[int, bytes] = {}
         self._last_seen_save = 0
+        self._clear_errors = ErrorLog("clear_cm の記録")
 
     def min_interval_ns(self) -> int:
         if self.mode_fn is not None and self.mode_fn() == "idle" and self.cfg.server.idle_fps > 0:
@@ -167,68 +169,80 @@ class Link:
             self.trace.mark(t_capture_ns, "sent")
 
     def receive_forever(self, stop: threading.Event) -> None:
-        ctl = self.cfg.control
-        timeout_ns = int(self.cfg.server.reply_timeout_s * 1e9)
+        errors = ErrorLog("受信")
         while not stop.is_set():
             try:
                 data, _ = self.sock.recvfrom(65535)
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as e:
                 if stop.is_set():
                     return
-                raise
-            now = time.monotonic_ns()
-            try:
-                reply = parse_reply(data)
-            except (ValueError, KeyError):
+                errors(e)
+                stop.wait(0.1)
                 continue
-            self.route.on_reply(now)
-            if self.trace is not None:
-                self.trace.mark(reply.t_capture_ns, "reply", now)
-            with self._lock:
-                st = self.stats
-                sent_ns = st._in_flight.pop(reply.seq, None)
-                jpeg = self._frames.pop(reply.seq, None)
-                # サーバーは溜まった古いフレームを返事なしで捨てるので、それより前の分は諦める
-                for seq in [s for s in st._in_flight if s < reply.seq]:
-                    del st._in_flight[seq]
-                st.replies += 1
-                st.last_reply_ns = now
-                st.last_infer_ms = reply.infer_ms
-                if sent_ns is not None:
-                    st.last_rtt_ms = (now - sent_ns) / 1e6
-                    if self.trace is not None:
-                        # 往復のうちサーバーの外（通信・tailscale・受信スレッドが起きるまで）
-                        self.trace.loop("往復のうちサーバー", reply.infer_ms)
-                        self.trace.loop("往復のうち外", st.last_rtt_ms - reply.infer_ms)
-                if now - reply.t_capture_ns > timeout_ns:
-                    st.dropped += 1
-                    continue
-            if self.clear is not None:
-                # controller.CLEAR_*。0: 欄が無い（超音波だけで走る）/ 1: 値がある / 2: null（間に合わなかった）/
-                # 3: clear_skip（出せない理由がある。止めないが、続けば遅く・短く）
-                if reply.clear_present:
-                    state = 1 if reply.clear_cm is not None else 2
-                else:
-                    state = 3 if reply.clear_skip else 0
-                cm = reply.clear_cm if reply.clear_cm is not None else -1.0
-                self.clear.write((reply.t_capture_ns, cm, state))
-            if self.on_clear is not None and (reply.clear_present or reply.clear_skip):
-                self.on_clear(reply)
-            box, score = pick_snoo(
-                reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo,
-                ctl.max_box_area,
-            )
-            if box is not None:
-                self.stats.snoo_hits += 1
-                if self.confirm.hit(reply.t_capture_ns):
-                    stress = -1.0 if box.stress is None else box.stress
-                    self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score, stress))
-                    if self.trace is not None:
-                        self.trace.mark(reply.t_capture_ns, "meas")
-                    if self.confirm.started and jpeg is not None:
-                        self._save_seen(now, jpeg, reply, box)
+            try:
+                self._on_packet(data)
+            except Exception as e:  # 1 つの返事の失敗で、受信（clear_cm・検出）を止めない
+                errors(e)
+
+    def _on_packet(self, data: bytes) -> None:
+        ctl = self.cfg.control
+        timeout_ns = int(self.cfg.server.reply_timeout_s * 1e9)
+        now = time.monotonic_ns()
+        try:
+            reply = parse_reply(data)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return  # 壊れた返事
+        self.route.on_reply(now)
+        if self.trace is not None:
+            self.trace.mark(reply.t_capture_ns, "reply", now)
+        with self._lock:
+            st = self.stats
+            sent_ns = st._in_flight.pop(reply.seq, None)
+            jpeg = self._frames.pop(reply.seq, None)
+            # サーバーは溜まった古いフレームを返事なしで捨てるので、それより前の分は諦める
+            for seq in [s for s in st._in_flight if s < reply.seq]:
+                del st._in_flight[seq]
+            st.replies += 1
+            st.last_reply_ns = now
+            st.last_infer_ms = reply.infer_ms
+            if sent_ns is not None:
+                st.last_rtt_ms = (now - sent_ns) / 1e6
+                if self.trace is not None:
+                    # 往復のうちサーバーの外（通信・tailscale・受信スレッドが起きるまで）
+                    self.trace.loop("往復のうちサーバー", reply.infer_ms)
+                    self.trace.loop("往復のうち外", st.last_rtt_ms - reply.infer_ms)
+            if now - reply.t_capture_ns > timeout_ns:
+                st.dropped += 1
+                return
+        if self.clear is not None:
+            # controller.CLEAR_*。0: 欄が無い（超音波だけで走る）/ 1: 値がある / 2: null（間に合わなかった）/
+            # 3: clear_skip（出せない理由がある。止めないが、続けば遅く・短く）
+            if reply.clear_present:
+                state = 1 if reply.clear_cm is not None else 2
+            else:
+                state = 3 if reply.clear_skip else 0
+            cm = reply.clear_cm if reply.clear_cm is not None else -1.0
+            self.clear.write((reply.t_capture_ns, cm, state))
+        if self.on_clear is not None and (reply.clear_present or reply.clear_skip):
+            try:
+                self.on_clear(reply)  # 記録に残すだけ。失敗しても検出は渡す
+            except Exception as e:
+                self._clear_errors(e)
+        box, score = pick_snoo(
+            reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo,
+            ctl.max_box_area,
+        )
+        if box is not None:
+            self.stats.snoo_hits += 1
+            if self.confirm.hit(reply.t_capture_ns):
+                stress = -1.0 if box.stress is None else box.stress
+                self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score, stress))
+                if self.trace is not None:
+                    self.trace.mark(reply.t_capture_ns, "meas")
+                if self.confirm.started and jpeg is not None:
+                    self._save_seen(now, jpeg, reply, box)
 
     def _save_seen(self, now_ns: int, jpeg: bytes, reply, box) -> None:
         if now_ns - self._last_seen_save < self.SEEN_GAP_NS:
@@ -246,19 +260,28 @@ class Link:
 
 
 def camera_loop(camera, link: Link, stop: threading.Event, on_frame=None) -> None:
-    last_sent = 0
+    last = [0]
+    errors = ErrorLog("カメラ")
     while not stop.is_set():
-        t_ns, jpeg = camera.grab()
-        if link.trace is not None:
-            t_grab, t_encoded = getattr(camera, "last_times", (0, 0))
-            link.trace.mark(t_ns, "grab", t_grab or None)
-            if t_encoded:
-                link.trace.mark(t_ns, "encoded", t_encoded)
-        if on_frame is not None:
-            on_frame(t_ns, jpeg)
-        now = time.monotonic_ns()
-        if now - last_sent < link.min_interval_ns():
-            continue  # 待機中は送る数を減らす（サーバーの GPU の電力）
-        if link.can_send(now):
-            last_sent = now
-            link.send(t_ns, jpeg)
+        try:
+            _camera_once(camera, link, on_frame, last)
+        except Exception as e:  # 撮れない・送れない（大きすぎる・ネットワークが無い）1 枚で止めない
+            errors(e)
+            stop.wait(0.05)
+
+
+def _camera_once(camera, link: Link, on_frame, last: list[int]) -> None:
+    t_ns, jpeg = camera.grab()
+    if link.trace is not None:
+        t_grab, t_encoded = getattr(camera, "last_times", (0, 0))
+        link.trace.mark(t_ns, "grab", t_grab or None)
+        if t_encoded:
+            link.trace.mark(t_ns, "encoded", t_encoded)
+    if on_frame is not None:
+        on_frame(t_ns, jpeg)
+    now = time.monotonic_ns()
+    if now - last[0] < link.min_interval_ns():
+        return  # 待機中は送る数を減らす（サーバーの GPU の電力）
+    if link.can_send(now):
+        last[0] = now
+        link.send(t_ns, jpeg)

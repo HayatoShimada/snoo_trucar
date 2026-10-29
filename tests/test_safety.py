@@ -323,3 +323,135 @@ def test_actuator_stops_and_fails_when_the_control_process_died():
     with pytest.raises(ControlDied):
         r._actuate_loop(car, TornCmd(100), Dead())
     assert car.log[-1] == ("stop",) and not any(e[0] == "apply" for e in car.log)
+
+
+def test_receive_thread_survives_bad_replies():
+    """壊れた JSON・on_clear の失敗で、受信のスレッドが死なない"""
+    import json
+    import threading
+
+    from snoo_trucar import control_proc
+    from snoo_trucar.config import Config
+    from snoo_trucar.link import Link
+    from snoo_trucar.protocol import make_reply
+    from snoo_trucar.shm import SeqBuffer
+
+    cfg = Config()
+    cfg.server.host = cfg.server.fallback_host = "127.0.0.1"
+    meas, clear = SeqBuffer(control_proc.MEAS_N), SeqBuffer(control_proc.CLEAR_N)
+    link = Link(cfg, meas, clear=clear)
+    stop = threading.Event()
+    import time
+
+    now = time.monotonic_ns()
+    good = json.loads(make_reply(1, now, 3.0, []))
+    good["clear_cm"] = 80.0
+    packets = [b"[1, 2]", b'{"seq": "x"}', json.dumps(good).encode(), json.dumps(good).encode()]
+
+    class Sock:
+        def recvfrom(self, n):
+            if not packets:
+                stop.set()
+                raise TimeoutError
+            return packets.pop(0), ("127.0.0.1", 1)
+
+        def close(self):
+            pass
+
+    real = link.sock
+    link.sock = Sock()
+    calls = []
+
+    def on_clear(reply):
+        calls.append(1)
+        raise OSError("ディスクがいっぱい")
+
+    link.on_clear = on_clear
+    try:
+        link.receive_forever(stop)
+        assert link.stats.replies == 2 and len(calls) == 2
+        assert clear.read()[1][2] == 1  # 値がある
+    finally:
+        real.close()
+        meas.close()
+        clear.close()
+
+
+def test_camera_thread_survives_send_errors():
+    import threading
+    from types import SimpleNamespace
+
+    from snoo_trucar.link import camera_loop
+
+    stop = threading.Event()
+    sent, n = [], [0]
+
+    class Cam:
+        def grab(self):
+            n[0] += 1
+            if n[0] > 5:
+                stop.set()
+            if n[0] == 2:
+                raise RuntimeError("カメラが一瞬止まった")
+            return n[0], b"j"
+
+    def send(t, j):
+        if t == 1:
+            raise OSError(90, "Message too long")
+        sent.append(t)
+
+    link = SimpleNamespace(trace=None, can_send=lambda now: True, send=send, min_interval_ns=lambda: 0)
+    camera_loop(Cam(), link, stop)
+    assert sent == [3, 4, 5, 6]
+
+
+def test_ultrasonic_thread_survives_read_errors():
+    import threading
+
+    from snoo_trucar import control_proc
+    from snoo_trucar.config import Config
+    from snoo_trucar.runner import Runner
+    from snoo_trucar.shm import SeqBuffer
+
+    r = Runner(Config(), quiet=True)
+    us = SeqBuffer(control_proc.US_N)
+    n = [0]
+
+    class Car:
+        def read_ultrasonic(self):
+            n[0] += 1
+            if n[0] == 1:
+                raise OSError("I2C")
+            if n[0] >= 3:
+                r.stop.set()
+            return 50.0
+
+    try:
+        t = threading.Thread(target=r._ultrasonic_loop, args=(Car(), us))
+        t.start()
+        t.join(5)
+        assert n[0] >= 3 and us.read()[1][1] == 50.0
+    finally:
+        us.close()
+
+
+def test_runner_stops_the_car_when_a_thread_dies():
+    import threading
+
+    import pytest
+
+    from snoo_trucar.config import Config
+    from snoo_trucar.runner import Runner, ThreadDied
+
+    r = Runner(Config(), seconds=2.0, quiet=True)
+
+    def broken(stop):
+        raise ValueError("想定していない失敗")
+
+    t = threading.Thread(target=r._watched, args=("壊れたスレッド", broken, r.stop), daemon=True)
+    t.start()
+    t.join(1)
+    car = RecCar()
+    with pytest.raises(ThreadDied):
+        r._actuate_loop(car, TornCmd(1000))
+    assert car.log[-1] == ("stop",)
