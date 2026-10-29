@@ -1,0 +1,21 @@
+# push と PR のたびに、テスト（制御のベンチと、シミュレーターで snoo を見つけて距離を保つ試験を含む）を回す。
+# picamera2・robot_hat はハードの無い環境では import しない作りなので、numpy と pytest だけで動く
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"  # 85pi4（Raspberry Pi OS Trixie）と同じ
+      - run: pip install numpy pytest
+      - run: python -m pytest -q
+      - name: 制御のベンチ
+        run: python -m snoo_trucar.bench --seeds 3 | tee -a "$GITHUB_STEP_SUMMARY"

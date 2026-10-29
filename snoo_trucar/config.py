@@ -126,6 +126,10 @@ class CarConfig:
     # 1 回に 21 ms ほど Python で待ち続け（GIL を持ったまま）、その間はカメラ・送信・書き込みが止まる。
     # 1 s ごとだと撮影→返事の最大が 64 ms、30 s ごとなら 55 ms（2026-10-29 に実測）
     ultrasonic_retry_s: float = 30.0
+    # 電池（2 セルのリチウムイオン、満充電 8.4 V）。battery_low_v より低いと走らない（首は動かす）。
+    # 0 V 近くは電池が入っていない・スイッチが切れている（サーボもモーターも動かない）
+    battery_low_v: float = 6.6
+    battery_check_s: float = 5.0
     pan_min: float = -35.0
     pan_max: float = 35.0
     tilt_min: float = -35.0

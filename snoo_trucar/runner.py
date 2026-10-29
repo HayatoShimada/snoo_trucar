@@ -21,6 +21,18 @@ from .shm import SeqBuffer
 from .trace import Trace
 
 CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古ければ止める
+BATTERY_NONE_V = 1.0  # これより低ければ電池が入っていない・スイッチが切れている
+
+
+def battery_state(volts: float | None, low_v: float) -> tuple[str, bool]:
+    """(状態の行に出す文字, 走ってよいか)"""
+    if volts is None:
+        return "電池=?", True  # 測れないときは止めない（測る仕組みの不具合で走れなくならないように）
+    if volts < BATTERY_NONE_V:
+        return f"電池={volts:.1f}V（入っていない・スイッチが切れている）", False
+    if volts < low_v:
+        return f"電池={volts:.1f}V（少ないので走らない）", False
+    return f"電池={volts:.1f}V", True
 
 
 class Runner:
@@ -42,6 +54,7 @@ class Runner:
         self.link = None
         self.camera = None
         self.last_cmd = None
+        self.battery: tuple[str, bool] = ("電池=?", True)
         self.trace: Trace | None = None
 
     def run(self) -> None:
@@ -108,6 +121,7 @@ class Runner:
                 panel = Panel(self.set_mode, self.current_mode)
                 threads.append(threading.Thread(target=panel.run, args=(self.stop,)))
         threads.append(threading.Thread(target=self._ultrasonic_loop, args=(car, us)))
+        threads.append(threading.Thread(target=self._battery_loop, args=(car,)))
         for t in threads:
             t.daemon = True
             t.start()
@@ -152,6 +166,15 @@ class Runner:
             wait = period if fails < 20 else self.cfg.car.ultrasonic_retry_s
             time.sleep(max(0.0, wait - (time.monotonic() - t0)))
 
+    def _battery_loop(self, car) -> None:
+        low_v = self.cfg.car.battery_low_v
+        while not self.stop.is_set():
+            label, ok = battery_state(car.read_battery(), low_v)
+            if ok != self.battery[1] and not self.quiet:
+                print(label, flush=True)
+            self.battery = (label, ok)
+            self.stop.wait(self.cfg.car.battery_check_s)
+
     def _actuate_loop(self, car, cmd: SeqBuffer) -> None:
         period = 1.0 / self.cfg.car.actuator_hz
         start = time.monotonic()
@@ -173,7 +196,8 @@ class Runner:
                 if time.monotonic_ns() - int(v[0]) > CMD_STALE_NS:
                     car.stop()  # 制御プロセスが止まった
                 else:
-                    car.apply(v[1], v[2], v[3], v[4])
+                    # 電池が少ない・入っていないときは走らない（首は動かす）
+                    car.apply(v[1], v[2] if self.battery[1] else 0.0, v[3], v[4])
                     self.last_cmd = v
                     self._record(now - start, v)
                     # 新しい検出を使ったコマンドを初めて書いた
@@ -204,6 +228,7 @@ class Runner:
         if v[13] >= 0:
             s += f" | 撮影 {int(v[13])}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"
+        s += f" | {self.battery[0]}"
         if self.link is not None:
             st = self.link.stats
             age = (time.monotonic_ns() - st.last_reply_ns) / 1e9 if st.last_reply_ns else -1

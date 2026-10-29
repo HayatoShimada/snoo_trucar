@@ -349,3 +349,13 @@ def test_bench_keeps_track_of_a_circling_snoo():
     assert r["見失った回数"] == 0
     assert r["向きのずれ p95"] < 8.0
     assert r["いちばん近づいた距離"] > 25.0
+
+
+def test_battery_state():
+    from snoo_trucar.runner import battery_state
+
+    assert battery_state(7.8, 6.6) == ("電池=7.8V", True)
+    assert battery_state(6.2, 6.6)[1] is False  # 少ない
+    label, ok = battery_state(0.0, 6.6)
+    assert not ok and "入っていない" in label
+    assert battery_state(None, 6.6)[1] is True  # 測れないときは止めない

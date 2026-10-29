@@ -56,6 +56,15 @@ class Car:
         cm = self.px.ultrasonic._read()
         return cm if cm is not None and cm > 0 else None
 
+    def read_battery(self) -> float | None:
+        """電池の電圧（V）。Robot HAT の ADC（A4）で測る"""
+        from robot_hat.utils import get_battery_voltage
+
+        try:
+            return float(get_battery_voltage())
+        except OSError:
+            return None
+
     def stop(self) -> None:
         self.px.stop()
         self._last[1] = 0
@@ -76,6 +85,7 @@ class FakeCar:
         self.writes = 0
         self.ultrasonic_cm: float | None = None
         self.ultrasonic_ok = True
+        self.battery_v: float | None = 7.8
 
     def apply(self, steer, speed, pan, tilt) -> None:
         self.steer, self.speed, self.pan, self.tilt = steer, speed, pan, tilt
@@ -84,6 +94,9 @@ class FakeCar:
     def read_ultrasonic(self):
         time.sleep(0.02)
         return self.ultrasonic_cm
+
+    def read_battery(self):
+        return self.battery_v
 
     def stop(self) -> None:
         self.speed = 0.0
