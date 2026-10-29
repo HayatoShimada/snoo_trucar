@@ -19,8 +19,8 @@ from .shm import SeqBuffer
 
 # meas: t_capture_ns, cx, cy, w, h, score, stress（判定なしは -1）
 MEAS_N = 7
-# us: t_ns, cm（測れないとき -1）
-US_N = 2
+# us: t_ns, cm（測れないとき -1）, stuck（走らせているのに画像が動かない。motion.py）
+US_N = 3
 # mode: controller.MODES の番号
 MODE_N = 1
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
@@ -70,6 +70,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 last_us = r[0]
                 us_t, cm = int(r[1][0]), r[1][1]
                 us_cm = cm if cm > 0 else None
+                controller.stuck = bool(r[1][2])
             if us_cm is not None and now - us_t > US_MAX_AGE_NS:
                 us_cm = None
 

@@ -57,6 +57,8 @@ class Runner:
         self.last_cmd = None
         self.battery: tuple[str, bool] = ("電池=?", True)
         self.trace: Trace | None = None
+        self.motion = None  # MotionWatch（実機のときだけ）
+        self.recorder = None
 
     def run(self) -> None:
         cfg = self.cfg
@@ -107,9 +109,21 @@ class Runner:
                 trace_path = Path(cfg.trace_dir).expanduser() / time.strftime("trace_%Y%m%d_%H%M%S.jsonl")
             self.trace = Trace(trace_path)
             self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser(), self.trace)
-            recorder = MapRecorder(Path(cfg.map_dir).expanduser())
+            recorder = self.recorder = MapRecorder(Path(cfg.map_dir).expanduser())
+
+            from .motion import MotionWatch, shrink
+
+            self.motion = MotionWatch()
 
             def on_frame(t_ns, jpeg):
+                t = t_ns * 1e-9
+                if self.motion.due(t):
+                    import simplejpeg
+
+                    gray = simplejpeg.decode_jpeg(jpeg, colorspace="GRAY", min_height=60, min_width=80)
+                    v = self.last_cmd
+                    moving = v is not None and abs(v[2]) > 0.5 and self.battery[1]
+                    self.motion.feed(t, shrink(gray), moving)
                 recorder.offer(t_ns, jpeg, self.last_cmd, self.last_us)
 
             threads.append(threading.Thread(target=self.link.receive_forever, args=(self.stop,)))
@@ -137,6 +151,8 @@ class Runner:
             for t in threads:
                 t.join(timeout=1.0)
             car.close()
+            if self.recorder is not None:
+                self.recorder.finish()
             if camera is not None:
                 camera.close()
             if self.link is not None:
@@ -161,7 +177,8 @@ class Runner:
             if self.trace is not None:
                 self.trace.loop("超音波1回", (time.monotonic() - t0) * 1000)
             self.last_us = cm
-            us.write((time.monotonic_ns(), cm if cm is not None else -1.0))
+            stuck = self.motion is not None and self.motion.stuck
+            us.write((time.monotonic_ns(), cm if cm is not None else -1.0, float(stuck)))
             fails = 0 if cm is not None else fails + 1
             # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける。
             # explore では -1 が「前が遠くまで空いている」の意味にもなるので、あけすぎない
@@ -230,6 +247,9 @@ class Runner:
             s += f" | 方位={v[7]:+6.1f}° 距離={v[8]:5.0f}cm 見えてから={v[9]:4.2f}s"
         if v[13] >= 0:
             s += f" | 撮影 {int(v[13])}"
+        if self.motion is not None and abs(v[2]) > 0.5:
+            m = self.motion
+            s += f" | 画像の動き={m.diff:.1f}（止まっているとき {m.noise:.1f}）" + (" 詰まった" if m.stuck else "")
         if int(v[17]) != OK:
             s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"

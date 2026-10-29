@@ -86,7 +86,8 @@ class Controller:
         self._ex_moved = 0.0
         self._ex_turn_dir = 1.0
         self._ex_us_at = -1e9
-        self._ex_turns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
+        self._ex_turns = 0
+        self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
     def observe_stress(self, stress: float | None) -> None:
@@ -269,6 +270,11 @@ class Controller:
                 self._ex_phase = "scan"
                 return 0.0, 0.0, 0.0, 0.0
         self.cmd.scan_index = DRIVE_INDEX
+        if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
+            # ぶつかった・詰まった。進んでいたなら下がって向きを変え、下がっていたなら止まって測り直す
+            self._ex_phase = "check" if self._ex_phase == "back" else "back"
+            self._ex_t = 0.0
+            self.stuck = False  # 次の判定はメインプロセスが改めて出す
         if self._ex_phase == "drive":
             if us_cm is None or us_cm < ctl.explore_clear_cm:
                 self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0

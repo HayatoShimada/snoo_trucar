@@ -505,3 +505,39 @@ def test_map_recorder_explore_records_while_driving(tmp_path, monkeypatch):
     scan = json.loads((d / "scan.json").read_text())
     assert d.name.startswith("explore_") and scan["mode"] == "explore"
     assert len(scan["frames"]) == 5 and all(f["moving"] and f["speed"] == 15.0 for f in scan["frames"])
+
+
+def test_motion_watch_notices_when_the_image_stops_moving():
+    import numpy as np
+
+    from snoo_trucar.motion import MotionWatch
+
+    rng = np.random.default_rng(0)
+    scene = rng.uniform(0, 255, (60, 200)).astype(np.float32)
+    w = MotionWatch()
+    t = 0.0
+
+    def frame(x):
+        a = scene[:, x : x + 80] + rng.normal(0, 3, (60, 80))
+        return a - a.mean()
+
+    for _ in range(10):  # 止まっている → ざらつきを測る
+        w.feed(t, frame(0), False)
+        t += 0.2
+    for k in range(15):  # 走って画像が流れる → 詰まっていない
+        assert not w.feed(t, frame(k * 4), True)
+        t += 0.2
+    stuck = [w.feed(t + k * 0.2, frame(60), True) for k in range(15)]  # 走らせているのに動かない
+    assert not stuck[0] and stuck[-1]
+    assert not w.feed(t + 4.0, frame(60), False)  # 止めたら解く
+
+
+def test_explore_backs_off_when_stuck():
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    c._ex_us_at = 0.0
+    c._ex_phase, c._ex_t = "drive", 0.0
+    assert c.step(est, S, 0.01, 200.0).speed > 0
+    c.stuck = True  # 進めていない
+    x = c.step(est, S, 0.01, 200.0)
+    assert x.speed < 0 and c._ex_phase == "back"

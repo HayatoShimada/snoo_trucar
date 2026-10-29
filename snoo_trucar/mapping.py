@@ -69,6 +69,9 @@ class MapRecorder:
             # 自分の動きの手がかり（指令。車輪の回転計は無い）
             entry.update(steer_deg=float(cmd[1]), speed=float(cmd[2]), moving=moving)
         self.entries.append(entry)
+        # 途中で止まっても（サービスの入れ替え・電池切れ）残るよう、1 枚ごとに足していく
+        with open(self.dir / "frames.jsonl", "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def finish(self) -> None:
         if self.dir is None:
