@@ -4,6 +4,7 @@
   fake-server  検出サーバーの偽物（決まった位置に snoo がいると返す）
   probe        画像を 1 枚サーバーに送って返事を見る
   panorama     map で撮った画像を 1 枚のパノラマにする
+  stop         モーターだけを止める（systemd の ExecStopPost。run が動いていなくても使える）
 """
 
 from __future__ import annotations
@@ -40,6 +41,18 @@ def _run(args) -> None:
                camera_file=args.camera_file).run()
     except KeyboardInterrupt:
         pass
+
+
+def _stop(args) -> int:
+    from .hal import stop_motors
+
+    try:
+        stop_motors(config_mod.load(args.config).car)
+    except Exception as e:  # 止められなかったことを残す（systemd のログ）。ここでは他にできることが無い
+        print(f"モーターを止められなかった: {type(e).__name__}: {e}", flush=True)
+        return 1
+    print("モーターを止めた", flush=True)
+    return 0
 
 
 def _fake_server(args) -> None:
@@ -135,5 +148,8 @@ def main(argv=None) -> None:
     m.add_argument("--pan-gain", type=float, default=0.96, help="実際のパン / 指令のパン")
     m.set_defaults(func=_panorama)
 
+    s = sub.add_parser("stop", help="モーターだけを止める（run が動いていなくても）")
+    s.set_defaults(func=_stop)
+
     args = p.parse_args(argv)
-    args.func(args)
+    return args.func(args)

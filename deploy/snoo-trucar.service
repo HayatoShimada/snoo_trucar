@@ -9,6 +9,9 @@ ExecStart=%h/snoo_trucar/.venv/bin/python -m snoo_trucar run
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+# 止めた・落ちた後に、モーターだけをもう一度止める（SIGKILL や例外で finally まで回らなかったとき）。
+# 先頭の - で、止められなくてもサービスの失敗にしない。picarx の初期化が固まっても 20 s で諦める
+ExecStopPost=-/usr/bin/timeout 20 %h/snoo_trucar/.venv/bin/python -m snoo_trucar stop
 
 [Install]
 WantedBy=default.target

@@ -26,6 +26,7 @@ journalctl --user -u snoo-trucar -f         # 状態（0.5 秒ごと）
 .venv/bin/python -m snoo_trucar run --mode watch
 .venv/bin/python -m snoo_trucar run --mode keep --max-speed 15
 .venv/bin/python -m snoo_trucar run --sim --mode keep    # ハードもサーバーも無しのシミュレーション
+.venv/bin/python -m snoo_trucar stop                     # モーターだけ止める（サービスの ExecStopPost もこれ）
 ```
 
 状態の行の例: `keep TRACK pan=-12.6 … | 方位=-12.6° 距離=45cm … | loop=4993Hz p99遅れ=0.5us | 送信=… rtt=20ms 推論=11ms`

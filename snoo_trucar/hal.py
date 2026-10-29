@@ -10,22 +10,32 @@ import time
 from .config import CarConfig
 
 
+def _picarx(cfg: CarConfig):
+    import os
+    import sys
+    import types
+
+    # robot_hat は import 時に pyaudio（音）を読む。使わないので無ければ空のものを置く
+    if "pyaudio" not in sys.modules:
+        try:
+            import pyaudio  # noqa: F401
+        except ImportError:
+            sys.modules["pyaudio"] = types.SimpleNamespace(paInt16=8)
+    from picarx import Picarx
+
+    os.makedirs(os.path.dirname(cfg.picarx_config), exist_ok=True)
+    return Picarx(config=cfg.picarx_config)
+
+
+def stop_motors(cfg: CarConfig) -> None:
+    """モーターだけを止める。run のプロセスが SIGKILL で消えた・落ちたときも、systemd の
+    ExecStopPost から呼ばれる。共有メモリもメインプロセスも使わない"""
+    _picarx(cfg).stop()
+
+
 class Car:
     def __init__(self, cfg: CarConfig):
-        import os
-        import sys
-        import types
-
-        # robot_hat は import 時に pyaudio（音）を読む。使わないので無ければ空のものを置く
-        if "pyaudio" not in sys.modules:
-            try:
-                import pyaudio  # noqa: F401
-            except ImportError:
-                sys.modules["pyaudio"] = types.SimpleNamespace(paInt16=8)
-        from picarx import Picarx
-
-        os.makedirs(os.path.dirname(cfg.picarx_config), exist_ok=True)
-        self.px = Picarx(config=cfg.picarx_config)
+        self.px = _picarx(cfg)
         self._last = [None, None, None, None]
         self.ultrasonic_ok = True
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import signal
 import threading
 import time
 
@@ -80,6 +81,12 @@ class Runner:
             daemon=True,
         )
         proc.start()  # スレッドを作る前に fork する
+        # systemctl stop は SIGTERM を送る。既定のままではその場で死に、finally の car.stop() が回らず、
+        # 最後に書いた速さで走り続けうる。stop を立てて、書き込みのループから抜けて止める。
+        # fork の後に替えるので、制御プロセスは既定のまま（SIGTERM で死ねば、cmd が古くなって止まる）
+        prev_term = None
+        if threading.current_thread() is threading.main_thread():
+            prev_term = signal.signal(signal.SIGTERM, lambda signum, frame: self.stop.set())
         if cfg.control.cpu >= 0:
             # 制御プロセスの CPU を空けておく。60 fps の JPEG 化やカメラのスレッドが同じ CPU に載ると、
             # 1 kHz の周期が 1 ms 以上遅れることがある。この後に作るスレッドもこれを引き継ぐ
@@ -169,6 +176,8 @@ class Runner:
             self.stop.set()
             proc_stop.set()
             car.stop()
+            if prev_term is not None:
+                signal.signal(signal.SIGTERM, prev_term)
             proc.join(timeout=1.0)
             for t in threads:
                 t.join(timeout=1.0)

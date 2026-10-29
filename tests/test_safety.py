@@ -183,3 +183,80 @@ def test_control_proc_marks_old_ultrasonic_as_stale():
     assert us_is_stale(S, 0)  # まだ 1 度も来ていない
     assert not us_is_stale(S + US_MAX_AGE_NS, S)
     assert us_is_stale(S + US_MAX_AGE_NS + 1, S)
+
+
+SIGTERM_SCRIPT = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+log = open(sys.argv[2], "a")
+from snoo_trucar import hal
+
+class Rec(hal.FakeCar):
+    def stop(self):
+        super().stop()
+        log.write("stop\n")
+        log.flush()
+
+hal.FakeCar = Rec
+from snoo_trucar.config import Config
+from snoo_trucar.runner import Runner
+
+cfg = Config()
+cfg.control.cpu = -1
+cfg.control.mode = "keep"
+print("ready", flush=True)
+Runner(cfg, sim=True, quiet=True, buttons=False).run()
+log.write("returned\n")
+"""
+
+
+def test_sigterm_stops_the_motors(tmp_path):
+    """systemctl stop（SIGTERM）でも finally まで回り、モーターを止める"""
+    import signal
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    repo = str(Path(__file__).resolve().parents[1])
+    log = tmp_path / "log"
+    p = subprocess.Popen([sys.executable, "-c", SIGTERM_SCRIPT, repo, str(log)],
+                         stdout=subprocess.PIPE, text=True)  # fmt: skip
+    try:
+        assert p.stdout.readline().strip() == "ready"
+        time.sleep(1.5)  # 制御プロセスとスレッドが回り始める
+        p.send_signal(signal.SIGTERM)
+        code = p.wait(timeout=10)
+    finally:
+        p.kill()
+    lines = log.read_text().split() if log.exists() else []
+    assert code == 0 and "stop" in lines and lines[-1] == "returned"
+
+
+def test_stop_command_stops_the_motors_without_the_main_process(tmp_path, monkeypatch):
+    """ExecStopPost の snoo_trucar stop は、picarx だけで止める。picarx が無くても落ちずに失敗を返す"""
+    import sys
+    import types
+    from pathlib import Path
+
+    from snoo_trucar import cli
+    from snoo_trucar import config as config_mod
+
+    cfg = config_mod.Config()
+    cfg.car.picarx_config = str(tmp_path / "px" / "picar-x.conf")
+    monkeypatch.setattr(config_mod, "load", lambda path=None: cfg)
+    calls = []
+
+    class Picarx:
+        def __init__(self, config):
+            calls.append("init")
+
+        def stop(self):
+            calls.append("stop")
+
+    monkeypatch.setitem(sys.modules, "picarx", types.SimpleNamespace(Picarx=Picarx))
+    assert cli.main(["stop"]) == 0 and calls == ["init", "stop"]
+    monkeypatch.setitem(sys.modules, "picarx", None)  # import できない
+    assert cli.main(["stop"]) == 1
+    unit = (Path(__file__).resolve().parents[1] / "deploy" / "snoo-trucar.service").read_text()
+    assert "ExecStopPost=" in unit and "snoo_trucar stop" in unit
