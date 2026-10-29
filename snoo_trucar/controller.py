@@ -47,7 +47,16 @@ EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待って�
 PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
 STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck")
 CLEAR_NULL_STOP_NS = 300_000_000  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
-DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
+DRIVE_INDEX = -2
+# 走っている間のカメラ。サーバーが画像から通り道の空き（clear_cm）を出すので、少し下を向けて車の前を入れる
+# （HFOV 54° だと車幅が画面に入るのは、tilt -15° で前端から約 13 cm 先から）。曲がるときは曲がる方へ首を向ける
+DRIVE_TILT = -15.0
+DRIVE_PAN_PER_STEER = 1.0
+DRIVE_PAN_MAX = 30.0
+
+
+def _drive_pan(steer_deg: float) -> float:
+    return max(-DRIVE_PAN_MAX, min(DRIVE_PAN_MAX, DRIVE_PAN_PER_STEER * steer_deg))  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
 
 
 @dataclass
@@ -342,7 +351,7 @@ class Controller:
                 self._ex_phase, self._ex_t = "scan", 0.0
                 return 0.0, 0.0, 0.0, 0.0
             self._ex_moved += speed * car.cm_s_per_speed * dt
-            return 0.0, 0.0, steer, speed
+            return _drive_pan(steer), DRIVE_TILT, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
             # ぶつかった・詰まった。進んでいたなら下がって向きを変え、下がっていたなら止まって測り直す
             self._ex_phase = "check" if self._ex_phase == "back" else "back"
@@ -364,17 +373,17 @@ class Controller:
                     self._ex_turn_dir = -self._ex_turn_dir
                     self._ex_phase, self._ex_t = "scan", 0.0
                     return 0.0, 0.0, 0.0, 0.0
-                return 0.0, 0.0, 0.0, ctl.explore_speed
+                return 0.0, DRIVE_TILT, 0.0, ctl.explore_speed
         # 前が塞がっている。切り返しで同じ向きに回り続ける（ハンドルを切って下がる → 逆に切って進む）。
         # 下がるのは後ろが見えないので短く。進む間は超音波が近ければやめる
         d = self._ex_turn_dir * car.steer_max
         if self._ex_phase == "back":
             if self._ex_t < ctl.explore_turn_s:
-                return 0.0, 0.0, d, -ctl.explore_speed
+                return 0.0, DRIVE_TILT, d, -ctl.explore_speed
             self._ex_phase, self._ex_t = "fwd", 0.0
         if self._ex_phase == "fwd":
             if self._ex_t < ctl.explore_turn_s and us_cm is not None and us_cm >= ctl.explore_clear_cm:
-                return 0.0, 0.0, -d, ctl.explore_speed
+                return _drive_pan(-d), DRIVE_TILT, -d, ctl.explore_speed
             self._ex_phase, self._ex_t = "check", 0.0
         if self._ex_phase == "check":
             if self._ex_t < EXPLORE_CHECK_S:  # 止まって超音波を測り直す
