@@ -3,7 +3,8 @@
 85pi4（PiCar-X）がカメラの画像を home-linux（Radeon RX 7900 XTX）に送り、home-linux が猫を検出して
 snoo かどうかを判定し、結果を返す。遅れを小さくするため **UDP** で、1 フレーム = 1 データグラム。
 
-- 宛先: `home-linux.taila713c8.ts.net:8710/udp`（tailnet の中だけ。サーバーは tailscale の IP（100.108.168.101）で受け、LAN には出さない）
+- 宛先: 家の中では `home-linux.local:8710/udp`（LAN。tailscale 経由より往復が約 3 ms 短い）。名前が引けない・返事が 1 秒来ないときは `home-linux.taila713c8.ts.net:8710/udp`（tailscale）に替え、30 秒ごとに LAN を試し直す
+- サーバーは 0.0.0.0 で受け、認証の無い UDP なので、決めた送り元（85pi4 の LAN と tailscale の IP）以外は捨てる
 - 返事は、送ってきたアドレス・ポートにそのまま返す
 - 目標: 撮ってから返事が届くまで **50 ms 以下**（推論 15 ms 以下）、60 fps を捌けること（今は往復 16〜19 ms、サーバーで 8 ms）
 - 届かない・遅れたフレームは捨ててよい（Pi は返事を待たずに最大 2 フレームまで送り、500 ms より古い返事は捨てる）

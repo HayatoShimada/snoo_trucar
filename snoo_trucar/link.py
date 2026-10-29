@@ -52,6 +52,55 @@ class Confirm:
         return False
 
 
+class Route:
+    """送り先を選ぶ。hosts の先頭（家の LAN）に送り、返事が来なければ次（tailscale）に替える。
+
+    先頭以外に替えた後は、retry_s 秒ごとに先頭を試し直す（家の外では、そのたびに switch_s 秒ほど
+    返事が途切れる）。名前は替えるたびに引き直す（DHCP で IP が変わっても追える）。
+    """
+
+    def __init__(self, hosts: list[str], port: int, switch_s: float, retry_s: float,
+                 resolve=socket.gethostbyname):  # fmt: skip
+        self.hosts = [h for h in hosts if h]
+        self.port = port
+        self.switch_ns = int(switch_s * 1e9)
+        self.retry_ns = int(retry_s * 1e9)
+        self.resolve = resolve
+        self.index = 0
+        self.since_ns: int | None = None  # 今の送り先に替えた時刻
+        self.last_reply_ns = 0
+        self._addr: tuple[str, int] | None = None
+
+    @property
+    def host(self) -> str:
+        return self.hosts[self.index]
+
+    def _use(self, index: int, now_ns: int) -> None:
+        self.index, self.since_ns, self._addr = index, now_ns, None
+
+    def addr(self, now_ns: int) -> tuple[str, int] | None:
+        """今送る先（引けなければ次の名前を試す。どれも引けなければ None）。"""
+        if self.since_ns is None:
+            self.since_ns = now_ns
+        heard = max(self.since_ns, self.last_reply_ns)
+        if now_ns - heard > self.switch_ns:
+            self._use((self.index + 1) % len(self.hosts), now_ns)
+        elif self.index and now_ns - self.since_ns > self.retry_ns:
+            self._use(0, now_ns)
+        for _ in self.hosts:
+            if self._addr is None:
+                try:
+                    self._addr = (self.resolve(self.host), self.port)
+                except OSError:
+                    self._use((self.index + 1) % len(self.hosts), now_ns)
+                    continue
+            return self._addr
+        return None
+
+    def on_reply(self, now_ns: int) -> None:
+        self.last_reply_ns = now_ns
+
+
 class Link:
     SEEN_GAP_NS = 10_000_000_000  # 見つけたときの写真は 10 秒に 1 枚まで
 
@@ -59,7 +108,9 @@ class Link:
         self.cfg = cfg
         self.meas = meas
         self.trace = trace  # trace.Trace（無ければ測らない）
-        self.addr = (socket.gethostbyname(cfg.server.host), cfg.server.port)
+        srv = cfg.server
+        self.route = Route([srv.host, srv.fallback_host], srv.port, srv.switch_after_s,
+                           srv.retry_host_s)  # fmt: skip
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
         self.sock.settimeout(0.2)
@@ -93,7 +144,10 @@ class Link:
                     del self._frames[seq]
             self.stats.sent += 1
             self.stats.jpeg_bytes = len(jpeg)
-        self.sock.sendto(data, self.addr)
+        addr = self.route.addr(time.monotonic_ns())
+        if addr is None:
+            return  # どの名前も引けない（ネットワークが無い）
+        self.sock.sendto(data, addr)
         if self.trace is not None:
             self.trace.mark(t_capture_ns, "sent")
 
@@ -114,6 +168,7 @@ class Link:
                 reply = parse_reply(data)
             except (ValueError, KeyError):
                 continue
+            self.route.on_reply(now)
             if self.trace is not None:
                 self.trace.mark(reply.t_capture_ns, "reply", now)
             with self._lock:

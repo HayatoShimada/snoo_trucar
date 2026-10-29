@@ -34,8 +34,13 @@ class CameraConfig:
 
 @dataclass
 class ServerConfig:
-    # home-linux の検出サーバー（docs/PROTOCOL.md）。tailnet の中だけで受ける
-    host: str = "home-linux.taila713c8.ts.net"
+    # home-linux の検出サーバー（docs/PROTOCOL.md）。家の中では tailscale を通さず LAN の名前に送る
+    # （ping は tailscale 経由で平均 6.7 ms、LAN 宛てで 3.7 ms）。名前が引けない・返事が
+    # switch_after_s 秒来ないときは fallback_host（tailscale）に替え、retry_host_s 秒ごとに host を試し直す
+    host: str = "home-linux.local"
+    fallback_host: str = "home-linux.taila713c8.ts.net"
+    switch_after_s: float = 1.0
+    retry_host_s: float = 30.0
     port: int = 8710
     # 返事を待たずに送ってよいフレーム数
     max_in_flight: int = 2

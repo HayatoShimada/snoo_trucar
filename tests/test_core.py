@@ -282,3 +282,27 @@ def test_servo_step_shift_and_crossing():
     b = np.roll(a, 7, axis=1)  # 右に 7 画素
     assert shift_px(a, b) == pytest.approx(7.0, abs=0.3)
     assert crossing([0.0, 10.0, 20.0], [0.0, 0.2, 1.0], 0.5) == pytest.approx(13.75)
+
+
+def test_route_prefers_lan_and_falls_back_to_tailscale():
+    from snoo_trucar.link import Route
+
+    names = {"lan": "192.168.0.248", "ts": "100.108.168.101"}
+
+    def resolve(host):
+        if host not in names:
+            raise OSError(host)
+        return names[host]
+
+    r = Route(["lan", "ts"], 8710, switch_s=1.0, retry_s=30.0, resolve=resolve)
+    assert r.addr(0) == ("192.168.0.248", 8710)
+    r.on_reply(int(0.5 * S))
+    assert r.addr(int(1.4 * S)) == ("192.168.0.248", 8710)  # 返事から 1 s 以内
+    assert r.addr(int(1.6 * S)) == ("100.108.168.101", 8710)  # 返事が途切れたら tailscale へ
+    r.on_reply(int(19.5 * S))
+    assert r.addr(int(20 * S)) is not None and r.host == "ts"  # 返事が来ている間は替えない
+    r.on_reply(int(31.5 * S))
+    assert r.addr(int(32 * S)) == ("192.168.0.248", 8710)  # 30 s たったら LAN を試し直す
+    del names["lan"]  # 家の外：LAN の名前が引けなければすぐ次へ
+    r2 = Route(["lan", "ts"], 8710, 1.0, 30.0, resolve=resolve)
+    assert r2.addr(0) == ("100.108.168.101", 8710)

@@ -209,7 +209,8 @@ class Runner:
             age = (time.monotonic_ns() - st.last_reply_ns) / 1e9 if st.last_reply_ns else -1
             s += (
                 f" | 送信={st.sent} 返事={st.replies} snoo={st.snoo_hits} "
-                f"rtt={st.last_rtt_ms:.0f}ms 推論={st.last_infer_ms:.0f}ms 最後の返事={age:.1f}s前"
+                f"rtt={st.last_rtt_ms:.0f}ms 推論={st.last_infer_ms:.0f}ms 最後の返事={age:.1f}s前 "
+                f"宛先={self.link.route.host}"
             )
         if self.camera is not None:
             boost = "（暗いので上げている）" if self.camera.boost.gain is not None else ""
