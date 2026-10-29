@@ -137,6 +137,9 @@ class ControlConfig:
     # サーバーの 1 歩で、超音波がこれより近ければ止める。地図が障害物を避けた道を出すので、Pi だけで決めるとき
     # （explore_clear_cm）より近くまで行く。clear_cm の 25 cm + 止まるまでの分
     explore_step_stop_cm: float = 30.0
+    # サーバーの前向きの 1 歩の上限（区切りを合わせて）。地図で見えている床が続けば、最後のまっすぐは 60 cm まで来る
+    # （long_step）。止まる決まり（超音波・clear_cm・画像が動かない）はそのまま
+    explore_server_step_cm: float = 80.0
     # サーバーの下がる 1 歩の上限（後ろは見えない）
     explore_reverse_max_cm: float = 30.0
     # サーバーが画像から出す通り道の空き（clear_cm）がこれより近ければ、進むのをやめて向きを変える。

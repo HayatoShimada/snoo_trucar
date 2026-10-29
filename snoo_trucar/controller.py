@@ -367,7 +367,7 @@ class Controller:
                     back = p[2] < 0
                     speed = abs(p[2]) if 0 < abs(p[2]) <= ctl.explore_speed else ctl.explore_speed
                     # 区切りごとの距離は、合わせて 1 歩の上限まで（後ろは見えないので、下がるときはもっと短く）
-                    left = ctl.explore_reverse_max_cm if back else ctl.explore_step_cm
+                    left = ctl.explore_reverse_max_cm if back else ctl.explore_server_step_cm
                     segs = []
                     for i in range(min(int(p[3]), MAX_SEGMENTS)):
                         steer = max(-car.steer_max, min(car.steer_max, p[4 + 2 * i]))

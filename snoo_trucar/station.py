@@ -61,7 +61,7 @@ class StationClient:
                 "prev_step": prev, "battery_v": self.runner.battery_v,
                 "ultrasonic_cm": self.runner.last_us,
                 "camera_height_cm": self.cfg.camera.height_cm,
-                "supports": ["reverse", "segments"]}  # fmt: skip
+                "supports": ["reverse", "segments", "long_step"]}  # fmt: skip
         t0 = time.monotonic()
         plan = (k, PLAN_FALLBACK) + (0.0,) * (PLAN_N - 2)
         try:

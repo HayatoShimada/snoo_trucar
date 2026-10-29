@@ -94,7 +94,7 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
 - `images`: 1 枚ずつ。ファイル名は `frames[].file`
 - 返事: `{"action": "move", "steer_deg", "speed", "distance_cm", "pose": {x, y, yaw_deg}}` か `{"action": "done", "reason"}`。
   meta の `"supports": ["reverse", "segments"]` を見て、サーバーは次も返す: `"reverse": true`（同じハンドルで下がる。30 cm まで）、
-  `"segments": [{"steer_deg", "distance_cm"}, …]`（曲がってからまっすぐ、など。3 つまで、合わせて 40 cm まで）。
+  `"segments": [{"steer_deg", "distance_cm"}, …]`（曲がってからまっすぐ、など。3 つまで。`"long_step"` で最後のまっすぐは 60 cm まで、Pi は合わせて 80 cm で切る）。
   `prev_step` には `reverse` と、走った `segments` も入れる。
   Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、前に進むときは超音波（`explore_step_stop_cm`、30 cm）・clear_cm、
   どちらの向きでも画像が動かないときは途中で止める
