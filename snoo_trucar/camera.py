@@ -22,7 +22,7 @@ class LowLightBoost:
     AE_GAIN_MAX = 8.0
 
     def __init__(self, frame_us: int, max_gain: float, target: float, every: int = 8):
-        self.frame_us = frame_us
+        self.frame_us = frame_us  # 露光の上限（max_exposure_ms があればそれ、無ければフレームの長さ）
         self.max_gain = max_gain
         self.target = target
         self.every = every
@@ -73,17 +73,24 @@ class Camera:
         self.cfg = cfg
         self.cam = Picamera2()
         frame_us = int(1e6 / cfg.fps)
+        controls = {"FrameDurationLimits": (frame_us, frame_us)}
+        exposure_us = frame_us
+        if 0 < cfg.max_exposure_ms * 1000 < frame_us:
+            # 露光を短く決め、明るさはゲイン（AE と LowLightBoost）で合わせる（snoo_trucar#1）
+            exposure_us = int(cfg.max_exposure_ms * 1000)
+            controls |= {"ExposureTimeMode": 1, "ExposureTime": exposure_us}
         conf = self.cam.create_video_configuration(
             main={"size": (cfg.width, cfg.height), "format": "YUV420"},
             transform=Transform(hflip=cfg.rotate180, vflip=cfg.rotate180),
-            controls={"FrameDurationLimits": (frame_us, frame_us)},
+            controls=controls,
             buffer_count=4,
         )
         self.cam.configure(conf)
         self.cam.start()
-        self.boost = LowLightBoost(frame_us, cfg.max_gain, cfg.brightness_target)
+        self.boost = LowLightBoost(exposure_us, cfg.max_gain, cfg.brightness_target)
         self.exposure_us = 0.0
         self.gain = 1.0
+        self.brightness = 0.0  # 直前のフレームの Y の平均（0..255）
         self.last_times = (0, 0)  # 直前のフレームの (受け取った時刻, JPEG にし終えた時刻)
         self.last_capture_ns = 0  # 直前のフレームの撮った時刻と明るさ（Y）。servo_step が使う
         self.last_y = None
@@ -108,7 +115,8 @@ class Camera:
         y = arr[:h]
         u = arr[h : h + h // 4].reshape(h // 2, w // 2)
         v = arr[h + h // 4 : h + h // 2].reshape(h // 2, w // 2)
-        ctl = self.boost.update(self.exposure_us, self.gain, float(y[::16, ::16].mean()))
+        self.brightness = float(y[::16, ::16].mean())
+        ctl = self.boost.update(self.exposure_us, self.gain, self.brightness)
         if ctl is not None:
             self.cam.set_controls(ctl)
         jpeg = self._encode(y, u, v, quality=self.cfg.jpeg_quality)

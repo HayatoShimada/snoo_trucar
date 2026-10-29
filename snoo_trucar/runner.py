@@ -239,7 +239,11 @@ class Runner:
             )
         if self.camera is not None:
             boost = "（暗いので上げている）" if self.camera.boost.gain is not None else ""
-            s += f" | 露光={self.camera.exposure_us / 1000:.1f}ms ゲイン={self.camera.gain:.1f}{boost}"
+            cam = self.camera
+            s += (
+                f" | 露光={cam.exposure_us / 1000:.1f}ms ゲイン={cam.gain:.1f}{boost} "
+                f"明るさ={cam.brightness:.0f}"
+            )
         if self.world is not None:
             b, d = self.world.truth()
             s += f" | 真値 方位={b:+6.1f}° 距離={d:5.0f}cm"
