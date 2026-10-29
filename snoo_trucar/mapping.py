@@ -76,6 +76,16 @@ class MapRecorder:
         with open(self.dir / "frames.jsonl", "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def note_clear(self, t_ns: int, clear_cm, clear_conf, clear_skip, ultrasonic_cm) -> None:
+        """サーバーが画像から出した通り道の空きを clear.jsonl に残す（t_capture_ns で frames と突き合わせる）"""
+        d = self.dir
+        if d is None:
+            return
+        row = {"t_capture_ns": t_ns, "clear_cm": clear_cm, "clear_conf": clear_conf,
+               "clear_skip": clear_skip, "ultrasonic_cm": ultrasonic_cm}  # fmt: skip
+        with open(d / "clear.jsonl", "a") as f:
+            f.write(json.dumps(row) + "\n")
+
     def finish(self) -> None:
         if self.dir is None:
             return

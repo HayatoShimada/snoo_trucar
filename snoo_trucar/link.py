@@ -126,6 +126,8 @@ class Link:
         self.clear = clear
         # 撮った時刻に書いていた指令 (steer_deg, speed, pan_deg, tilt_deg) を返す関数（SNO2 に載せる）
         self.pose_fn = None
+        # 返事に clear_cm の欄か clear_skip があったら呼ぶ（reply）。explore の記録に残して、超音波と比べるため
+        self.on_clear = None
         self._frames: dict[int, bytes] = {}
         self._last_seen_save = 0
 
@@ -201,6 +203,8 @@ class Link:
                 state = 0 if not reply.clear_present else 1 if reply.clear_cm is not None else 2
                 cm = reply.clear_cm if reply.clear_cm is not None else -1.0
                 self.clear.write((reply.t_capture_ns, cm, state))
+            if self.on_clear is not None and (reply.clear_present or reply.clear_skip):
+                self.on_clear(reply)
             box, score = pick_snoo(
                 reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo,
                 ctl.max_box_area,
