@@ -21,12 +21,12 @@ WHEELBASE_CM = 9.5
 
 class SimWorld:
     def __init__(self, cfg: Config, car: FakeCar, meas: SeqBuffer, seed: int = 0,
-                 fps: float = 30.0, latency_s: float = 0.06, cat_speed_cm_s: float = 15.0):  # fmt: skip
+                 fps: float | None = None, latency_s: float = 0.06, cat_speed_cm_s: float = 15.0):  # fmt: skip
         self.cfg = cfg
         self.car = car
         self.meas = meas
         self.rng = random.Random(seed)
-        self.fps = fps
+        self.fps = fps or cfg.camera.fps
         self.latency_s = latency_s
         self.cat_speed = cat_speed_cm_s
         # 車は原点で +x を向く。snoo は左後ろのほうにいる（最初は見えない）

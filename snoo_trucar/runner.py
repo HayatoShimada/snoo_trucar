@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import threading
 import time
 
@@ -38,6 +39,7 @@ class Runner:
         self.history: list[tuple] = []  # (t, state, bearing_est, dist_est, bearing_true, dist_true)
         self.world = None
         self.link = None
+        self.camera = None
         self.last_cmd = None
 
     def run(self) -> None:
@@ -56,6 +58,13 @@ class Runner:
             daemon=True,
         )
         proc.start()  # スレッドを作る前に fork する
+        if cfg.control.cpu >= 0:
+            # 制御プロセスの CPU を空けておく。60 fps の JPEG 化やカメラのスレッドが同じ CPU に載ると、
+            # 1 kHz の周期が 1 ms 以上遅れることがある。この後に作るスレッドもこれを引き継ぐ
+            try:
+                os.sched_setaffinity(0, set(range(os.cpu_count() or 1)) - {cfg.control.cpu})
+            except OSError:
+                pass
 
         threads: list[threading.Thread] = []
         camera = None
@@ -76,7 +85,7 @@ class Runner:
             if self.camera_file:
                 camera = FileCamera(cfg.camera, self.camera_file)
             else:
-                camera = Camera(cfg.camera)
+                camera = self.camera = Camera(cfg.camera)
             self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser())
             recorder = MapRecorder(Path(cfg.map_dir).expanduser())
 
@@ -178,6 +187,9 @@ class Runner:
                 f" | 送信={st.sent} 返事={st.replies} snoo={st.snoo_hits} "
                 f"rtt={st.last_rtt_ms:.0f}ms 推論={st.last_infer_ms:.0f}ms 最後の返事={age:.1f}s前"
             )
+        if self.camera is not None:
+            boost = "（暗いので上げている）" if self.camera.boost.gain is not None else ""
+            s += f" | 露光={self.camera.exposure_us / 1000:.1f}ms ゲイン={self.camera.gain:.1f}{boost}"
         if self.world is not None:
             b, d = self.world.truth()
             s += f" | 真値 方位={b:+6.1f}° 距離={d:5.0f}cm"

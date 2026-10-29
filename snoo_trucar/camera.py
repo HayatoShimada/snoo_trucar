@@ -1,10 +1,64 @@
-"""カメラ（Picamera2）。JPEG にして返す。"""
+"""カメラ（Picamera2）。JPEG にして返す。
+
+60 fps では 1 枚の露光が 16.6 ms までになり、暗い部屋では 30 fps の半分の明るさになる。
+libcamera の自動露出（AE）はゲインを 8 までしか上げないので、露光もゲインも上限に張り付いて
+まだ暗いときだけ、ゲインを手で 16 まで上げる（LowLightBoost）。fps は落とさない。
+"""
 
 from __future__ import annotations
 
 import time
 
 from .config import CameraConfig
+
+
+class LowLightBoost:
+    """AE が露光・ゲインとも上限なのに暗いとき、アナログゲインを max_gain まで上げる。
+
+    明るさ（画素の平均）が target に近づくようにゲインを決め、AE の上限（8）より下がれば AE に戻す。
+    制御は数フレーム遅れて効くので、every フレームに 1 回だけ変える。
+    """
+
+    AE_GAIN_MAX = 8.0
+
+    def __init__(self, frame_us: int, max_gain: float, target: float, every: int = 8):
+        self.frame_us = frame_us
+        self.max_gain = max_gain
+        self.target = target
+        self.every = every
+        self.gain: float | None = None  # 手で決めているゲイン（None なら AE に任せている）
+        self._n = 0
+
+    def update(self, exposure_us: float, gain: float, mean: float) -> dict | None:
+        """今のフレームの露光・ゲイン・明るさから、カメラに送る制御（変えないときは None）を返す。"""
+        self._n += 1
+        if self._n % self.every:
+            return None
+        if self.gain is None:
+            saturated = exposure_us >= 0.9 * self.frame_us and gain >= self.AE_GAIN_MAX - 0.1
+            if not saturated or mean >= self.target or self.max_gain <= self.AE_GAIN_MAX:
+                return None
+            want = self.AE_GAIN_MAX * self.target / max(mean, 1.0)
+        else:
+            want = gain * self.target / max(mean, 1.0)
+            if want < self.AE_GAIN_MAX:
+                self.gain = None
+                return {"AnalogueGainMode": 0}  # 明るくなったので AE に戻す
+        want = min(self.max_gain, want)
+        if self.gain is not None and abs(want - self.gain) < 0.5:
+            return None
+        self.gain = want
+        return {"AnalogueGainMode": 1, "AnalogueGain": want}
+
+
+def capture_time_ns(sensor_ts_ns: int, exposure_us: float, readout_ms: float) -> int:
+    """画面の中央の行を露光した時間の真ん中（CLOCK_MONOTONIC の ns）。
+
+    Pi の SensorTimestamp は 1 行目の読み出しの始まり（＝1 行目の露光の終わり）。
+    30 fps（露光 33 ms）で受け取りまでが 22 ms だったので、露光の始まりではない。
+    中央の行は露光の半分だけ前、読み出しの半分だけ後になる。
+    """
+    return int(sensor_ts_ns - exposure_us * 500 + readout_ms * 5e5)
 
 
 class Camera:
@@ -25,16 +79,27 @@ class Camera:
         )
         self.cam.configure(conf)
         self.cam.start()
+        self.boost = LowLightBoost(frame_us, cfg.max_gain, cfg.brightness_target)
+        self.exposure_us = 0.0
+        self.gain = 1.0
 
     def grab(self) -> tuple[int, bytes]:
-        """(撮った時刻 ns（CLOCK_MONOTONIC）, JPEG)"""
+        """(撮った時刻 ns（CLOCK_MONOTONIC。中央の行の露光の真ん中）, JPEG)"""
         req = self.cam.capture_request()
         try:
             arr = req.make_array("main")
-            # SensorTimestamp は露光の始まり（CLOCK_MONOTONIC の ns）。無ければ今
-            t_ns = req.get_metadata().get("SensorTimestamp") or time.monotonic_ns()
+            md = req.get_metadata()
         finally:
             req.release()
+        ts = md.get("SensorTimestamp")
+        self.exposure_us = md.get("ExposureTime", 0)
+        self.gain = md.get("AnalogueGain", 1.0)
+        t_ns = (
+            capture_time_ns(ts, self.exposure_us, self.cfg.readout_ms) if ts else time.monotonic_ns()
+        )
+        ctl = self.boost.update(self.exposure_us, self.gain, float(arr[::16, ::16].mean()))
+        if ctl is not None:
+            self.cam.set_controls(ctl)
         # Picamera2 の RGB888 は B, G, R の順に並ぶ
         jpeg = self._encode(arr, quality=self.cfg.jpeg_quality, colorspace="BGR")
         return int(t_ns), jpeg

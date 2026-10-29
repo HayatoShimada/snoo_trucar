@@ -14,8 +14,18 @@ DEFAULT_PATH = Path.home() / ".config" / "snoo_trucar" / "config.toml"
 class CameraConfig:
     width: int = 640
     height: int = 480
-    fps: float = 30.0
-    jpeg_quality: int = 70
+    # OV5647 の 640x480 のモードは 62.5 fps まで。60 fps で撮ってから届くまでと、結果が新しくなる間隔が
+    # 30 fps の半分になる（間隔 16.7 ms、カメラの中の遅れ 22 → 19 ms）
+    fps: float = 60.0
+    # サーバーの検出は品質 50 でも見つかる割合が変わらなかった。小さいほど送るのが速い
+    jpeg_quality: int = 60
+    # 60 fps では露光が 16.6 ms までになる。暗いときはアナログゲインをここまで上げる（AE は 8 まで。センサーは 16 まで）
+    max_gain: float = 16.0
+    # 暗いときに目指す明るさ（画素の平均 0..255）。30 fps・ゲイン 8 で露光が上限のとき 55 だった
+    brightness_target: float = 60.0
+    # 1 行目から最後の行までの読み出しにかかる時間（ms）。撮った時刻を画面の中央の行に合わせるのに使う。
+    # 640x480 のモードの最短フレーム（16 ms）からの見積もりで、測っていない
+    readout_ms: float = 15.0
     # OV5647（PiCar-X 付属）の画角。度
     hfov_deg: float = 53.5
     vfov_deg: float = 41.4
@@ -67,6 +77,9 @@ class ControlConfig:
     # 探すときに車体も動かす（false ならカメラを振るだけ）
     search_drive: bool = False
     search_drive_speed: float = 20.0
+    # カメラ・ハンドルは、今の推定ではなく lead_s 秒後の予測に向ける。書き込みは 50 Hz の 0 次ホールド
+    # （平均 10 ms 遅れ）、サーボの PWM も 50 Hz（平均 10 ms）、サーボが動き出すまで 10 ms ほど
+    lead_s: float = 0.03
     # 見失ってから予測だけで追う時間と、探し始めるまでの時間
     coast_s: float = 0.7
     lost_s: float = 2.0

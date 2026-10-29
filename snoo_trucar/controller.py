@@ -95,9 +95,10 @@ class Controller:
         elif state == SEARCH:
             pan_goal, tilt_goal, steer, speed = self._search(dt)
         else:
-            bearing = est.bearing.x[0]
+            # 書いてから効くまでの遅れ（0 次ホールドとサーボ）の分だけ先を狙う
+            bearing = est.bearing.x[0] + est.bearing.x[1] * ctl.lead_s
             pan_goal = bearing
-            tilt_goal = est.elev.x[0]
+            tilt_goal = est.elev.x[0] + est.elev.x[1] * ctl.lead_s
             if state == TRACK and self.mode in ("keep", "follow"):
                 steer, speed = self._approach(bearing, est.dist.x[0], ultrasonic_cm)
 

@@ -207,3 +207,34 @@ def test_confirm_needs_repeated_hits():
     assert c.hit(1066 * ms)  # 0.5 秒以内に 3 回
     assert c.hit(1500 * ms)  # 追っている間は 1 回でも通す
     assert not c.hit(3000 * ms)  # 見失ったあとは、また 3 回要る
+
+
+def test_low_light_boost_raises_gain_only_when_ae_is_saturated():
+    from snoo_trucar.camera import LowLightBoost
+
+    boost = LowLightBoost(frame_us=16666, max_gain=16.0, target=60.0, every=1)
+    assert boost.update(10000, 4.0, 30.0) is None  # AE にまだ余裕がある
+    assert boost.update(16500, 8.0, 70.0) is None  # 上限だが十分明るい
+    ctl = boost.update(16500, 8.0, 30.0)  # 上限で暗い → 8 × 60/30 = 16
+    assert ctl == {"AnalogueGainMode": 1, "AnalogueGain": 16.0}
+    assert boost.update(16500, 16.0, 58.0) is None  # 目標に近ければ変えない
+    assert boost.update(16500, 16.0, 200.0) == {"AnalogueGainMode": 0}  # 明るくなったら AE に戻す
+    assert boost.gain is None
+
+
+def test_capture_time_is_the_middle_of_the_centre_row():
+    from snoo_trucar.camera import capture_time_ns
+
+    # 読み出しの始まり 1 s、露光 16 ms、読み出し 15 ms → 1 s − 8 ms + 7.5 ms
+    assert capture_time_ns(1_000_000_000, 16000, 15.0) == 999_500_000
+
+
+def test_controller_leads_the_target_by_lead_s():
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    controller, ctl = _controller("watch")
+    _seen(est, S, 10.0, 100.0)
+    est.bearing.x[1] = 100.0  # 右に 100°/s
+    goal = 10.0 + 100.0 * ctl.lead_s
+    for _ in range(2000):  # カメラが目標に落ち着くまで回す
+        cmd = controller.step(est, S, 0.001, None)
+    assert cmd.pan == pytest.approx(goal, abs=0.1)
