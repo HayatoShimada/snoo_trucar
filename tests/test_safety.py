@@ -667,3 +667,68 @@ def test_station_prev_step_from_what_was_driven(monkeypatch, tmp_path):
         assert sent[-1]["prev_step"] == {"stop_reason": "local"}
     finally:
         plan.close()
+
+
+def _explore_with_snoo(session_s=None):
+    from snoo_trucar.guard import GuardConfig
+
+    ctl = ControlConfig(mode="explore")
+    if session_s is not None:
+        ctl.guard = GuardConfig(session_s=session_s)
+    c = Controller(ctl, CarConfig())
+    c._ex_us_at = 0.0
+    c._ex_phase = "drive"
+    c.set_clear(0, -1.0, S)
+    return c, ctl, TargetEstimator(53.5, 41.4, 33.0)
+
+
+def _see(est, t, dist, rate=0.0):
+    est.valid = True
+    est.last_seen_ns = t
+    est.bearing.x[:] = (0.0, 0.0)
+    est.dist.x[:] = (dist, rate)
+
+
+def test_explore_applies_guard_flee_rule_when_snoo_is_visible():
+    """explore で遠く（150 cm より先）に snoo が見えている間も、近づいた直後に速く離れたら下がる"""
+    from snoo_trucar.guard import BACKOFF, OK
+
+    c, ctl, est = _explore_with_snoo()
+    t = S
+    for _ in range(20):
+        t += int(DT * S)
+        _see(est, t, 300.0)
+        x = c.step(est, t, DT, 200.0)
+    assert x.speed > 0 and c.guard.state == OK
+    for _ in range(int(ctl.guard.flee_hold_s / DT) + 2):
+        t += int(DT * S)
+        _see(est, t, 300.0, rate=80.0)  # snoo が速く離れる
+        x = c.step(est, t, DT, 200.0)
+    assert c.guard.state == BACKOFF and x.speed < 0
+
+
+def test_explore_play_time_limit_counts_only_while_snoo_is_around():
+    """遊びの時間（session_s）は snoo が見えている間だけ数える。いないなら探索を続ける"""
+    from snoo_trucar.guard import REST
+
+    c, ctl, est = _explore_with_snoo(session_s=2.0)
+    t = S
+    for _ in range(int(3.0 / DT)):  # snoo がいない
+        t += int(DT * S)
+        c.step(est, t, DT, 200.0)
+    assert c.guard.state != REST
+    c._ex_phase, c._ex_moved = "drive", 0.0
+    for _ in range(int(2.5 / DT)):
+        t += int(DT * S)
+        _see(est, t, 300.0)
+        x = c.step(est, t, DT, 200.0)
+    assert c.guard.state == REST and x.speed == 0
+
+
+def test_explore_still_stops_and_watches_a_near_snoo():
+    from snoo_trucar.controller import TRACK
+
+    c, ctl, est = _explore_with_snoo()
+    _see(est, S, 100.0)
+    x = c.step(est, S, DT, 200.0)
+    assert x.state == TRACK and x.speed == 0 and c.mode == "explore"

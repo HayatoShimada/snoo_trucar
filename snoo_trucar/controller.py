@@ -292,10 +292,16 @@ class Controller:
             if state == TRACK and self.mode in ("keep", "follow"):
                 steer, speed = self._approach(bearing, est.dist.x[0], ultrasonic_cm)
 
-        # 走る行動の出力は、最後に必ず安全の層を通す
-        seen = est.valid and state == TRACK
+        # 走る行動の出力は、最後に必ず安全の層を通す。snoo の距離は、見えている間はいつも渡す
+        # （explore で遠くに見えて探索を続けている間も、30 cm の決まりと「速く離れた」が効くように）。
+        # 遊びの時間は keep / follow と、explore で snoo が近くにいる（見失って lost_s まで）間だけ数える。
+        # snoo のいない探索まで遊びに数えると、3 分で 10 分休んでしまう
+        seen = est.valid and since < ctl.coast_s
+        playing = self.mode in ("keep", "follow") or (
+            self.mode == "explore" and est.valid and since < ctl.lost_s
+        )
         steer, speed = self.guard.apply(
-            self.mode in ("keep", "follow"), dt, steer, speed,
+            playing, dt, steer, speed,
             est.dist.x[0] if seen else None, est.dist.x[1] if seen else None,
         )
         cmd.guard = self.guard.state
