@@ -130,13 +130,13 @@ class Link:
         self.on_clear = None
         # 今の行動を返す関数。待機（idle）のときは cfg.server.idle_fps でしか送らない
         self.mode_fn = None
+        self._frames: dict[int, bytes] = {}
+        self._last_seen_save = 0
 
     def min_interval_ns(self) -> int:
         if self.mode_fn is not None and self.mode_fn() == "idle" and self.cfg.server.idle_fps > 0:
             return int(1e9 / self.cfg.server.idle_fps)
         return 0
-        self._frames: dict[int, bytes] = {}
-        self._last_seen_save = 0
 
     def can_send(self, now_ns: int) -> bool:
         timeout_ns = int(self.cfg.server.reply_timeout_s * 1e9)

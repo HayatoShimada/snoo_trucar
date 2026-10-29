@@ -760,3 +760,22 @@ def test_link_sends_fewer_frames_while_idle():
     finally:
         L.time.monotonic_ns = real
     assert 18 <= idle_n <= 22 and len(sent) >= 230  # 4 s: 待機は 5 fps、行動中は 60 fps
+
+
+def test_real_link_idle_interval():
+    from snoo_trucar import control_proc
+    from snoo_trucar.link import Link
+
+    cfg = Config()
+    cfg.server.host = cfg.server.fallback_host = "127.0.0.1"
+    meas = SeqBuffer(control_proc.MEAS_N)
+    link = Link(cfg, meas)
+    try:
+        link.mode_fn = lambda: "idle"
+        assert link.min_interval_ns() == int(1e9 / cfg.server.idle_fps)
+        link.mode_fn = lambda: "explore"
+        assert link.min_interval_ns() == 0
+        assert link._frames == {}  # 初期化が最後まで済んでいる
+    finally:
+        link.close()
+        meas.close()
