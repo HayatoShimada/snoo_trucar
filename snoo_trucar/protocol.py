@@ -64,6 +64,8 @@ class Reply:
     clear_present: bool = False
     clear_cm: float | None = None
     clear_conf: float | None = None
+    # clear_cm を出さなかった理由（"out_of_view": 大きく曲がっていて通り道が画面に入らない / "reversing"）
+    clear_skip: str | None = None
 
 
 def parse_reply(data: bytes) -> Reply:
@@ -90,7 +92,7 @@ def parse_reply(data: bytes) -> Reply:
     conf = msg.get("clear_conf")
     return Reply(int(msg["seq"]), int(msg["t_capture_ns"]), float(msg.get("infer_ms", 0)), boxes,
                  "clear_cm" in msg, None if clear is None else float(clear),
-                 None if conf is None else float(conf))  # fmt: skip
+                 None if conf is None else float(conf), msg.get("clear_skip"))  # fmt: skip
 
 
 def make_reply(seq: int, t_capture_ns: int, infer_ms: float, dets: list[dict]) -> bytes:

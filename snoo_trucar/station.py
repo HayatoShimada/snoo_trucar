@@ -54,7 +54,8 @@ class StationClient:
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
                 "mode": "explore", "frames": entries, "session_id": self._session, "station_id": k,
                 "prev_step": prev, "battery_v": self.runner.battery_v,
-                "ultrasonic_cm": self.runner.last_us}  # fmt: skip
+                "ultrasonic_cm": self.runner.last_us,
+                "camera_height_cm": self.cfg.camera.height_cm}  # fmt: skip
         t0 = time.monotonic()
         plan = (k, PLAN_FALLBACK, 0.0, 0.0, 0.0)
         try:

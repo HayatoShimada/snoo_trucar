@@ -14,6 +14,8 @@ DEFAULT_PATH = Path.home() / ".config" / "snoo_trucar" / "config.toml"
 
 @dataclass
 class CameraConfig:
+    # 床からレンズの中心まで（cm）。2026-10-29 にユーザーが測った。地図の縮尺に使う（station の meta）
+    height_cm: float = 8.0
     width: int = 640
     height: int = 480
     # OV5647 の 640x480 のモードは 62.5 fps まで。60 fps で撮ってから届くまでと、結果が新しくなる間隔が
@@ -161,9 +163,9 @@ class CarConfig:
     tilt_max: float = 35.0
     steer_max: float = 30.0
     # 車体の動きの換算（自転車モデル）。速さ 1 あたりの cm/s と、前後の車輪の間（cm）。
-    # どちらも見積もりで、測っていない（snoo_trucar#8）
+    # 速さの換算は見積もりで、測っていない（snoo_trucar#8）。車輪の半径は 3.26 cm、左右の車輪の間は 12 cm
     cm_s_per_speed: float = 1.0
-    wheelbase_cm: float = 9.5
+    wheelbase_cm: float = 14.0  # PiCar-X の URDF（cau-se/ARCHES-PiCar-X）。最小回転半径は ±30° で 24 cm
 
 
 @dataclass

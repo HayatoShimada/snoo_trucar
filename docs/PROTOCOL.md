@@ -68,7 +68,7 @@ UTF-8 の JSON 1 つ。
 | `dets[].cat` | 猫である確からしさ（0..1） |
 | `dets[].snoo` | snoo である確からしさ（0..1）。判定できないときは `null`（Pi 側は `require_snoo = false` で猫なら追う） |
 | `dets[].play` | 任意。遊びの様子 `{"state": "stalk", "p": {"attention", "stalk", "pounce", "bored", "stress"}}`（各 0..1）。判定できないときは `null` か省く。Pi は今 `p.stress` だけを使う（`snoo_trucar/guard.py`: 0.8 以上を 1 回、0.5 以上を 3 回続けて見たら止まって下がる） |
-| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える |
+| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える。大きく曲がっていて通り道が画面に入らないとき・下がっているときは欄を出さず、`clear_skip`（`"out_of_view"` / `"reversing"`）を出す |
 
 Pi は `cat ≥ 0.35` かつ `snoo ≥ 0.6` の中から `cat × snoo` が最大の箱を snoo とみなす（`config.toml` の `[control]` で変えられる）。
 
@@ -90,7 +90,7 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
 
 - `meta`: scan.json の形の JSON。`frames[]` はこの station の画像（前の station から走ってくる間の分も）。
   加えて `session_id`（explore_日時）、`station_id`（0, 1, …）、`prev_step`（`{steer_deg, speed, seconds, est_distance_cm, stop_reason}`、
-  最初は null、Pi だけで決めた後は `{"stop_reason": "local"}`）、`battery_v`、`ultrasonic_cm`
+  最初は null、Pi だけで決めた後は `{"stop_reason": "local"}`）、`battery_v`、`ultrasonic_cm`、`camera_height_cm`（8.0、ユーザーが測った）
 - `images`: 1 枚ずつ。ファイル名は `frames[].file`
 - 返事: `{"action": "move", "steer_deg", "speed", "distance_cm", "pose": {x, y, yaw_deg}}` か `{"action": "done", "reason"}`。
   Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、超音波・clear_cm・画像が動かないときは途中で止める
