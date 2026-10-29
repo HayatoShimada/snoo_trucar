@@ -530,3 +530,46 @@ def test_motion_watch_restarts_when_the_direction_changes():
     assert abs(w._moving_since - 10 * 0.2) < 1e-6
     w.feed(t, frame(56), True, reverse=True)
     assert w._moving_since == t  # 動き出しから数え直す
+
+
+def _low_pass(c, k):
+    """サーバーの 1 歩を走り始め、画像 20 cm・超音波 70 cm（低い物）で越え始める"""
+    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_SPEED
+
+    _server_step(c, k, cm=80.0, speed=12.0)
+    c.set_clear(CLEAR_VALUE, 20.0, k.t, k.t)
+    x = k.run(DT, us=70.0)
+    assert x.speed == LOW_OBSTACLE_SPEED and c.low_passed == 1
+
+
+def test_low_obstacle_pass_only_once_per_step():
+    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_CM, LOW_OBSTACLE_SPEED
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    _low_pass(c, k)
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)  # 越えた
+    k.run(LOW_OBSTACLE_CM / (LOW_OBSTACLE_SPEED * c.car.cm_s_per_speed) + 0.1, us=70.0)
+    assert c._low_left <= 0 and c._ex_phase == "step"
+    c.set_clear(CLEAR_VALUE, 20.0, k.t, k.t)  # また近い。超音波は先 → でも 2 回目は越えない
+    x = k.run(DT, us=70.0)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear" and c.low_passed == 1
+
+
+def test_low_obstacle_pass_stops_when_clear_shrinks():
+    """越えている間に、進んだ分より画像の空きが縮んだら（前に別の物が出てきた）止まる"""
+    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_SPEED
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    _low_pass(c, k)
+    v = LOW_OBSTACLE_SPEED * c.car.cm_s_per_speed
+    # 進んだ分だけ近づく（同じ低い物）→ 越え続ける
+    for _ in range(20):
+        moved = (k.t - S) / S * v
+        c.set_clear(CLEAR_VALUE, max(0.0, 20.0 - moved), k.t, k.t)
+        assert k.run(DT, us=70.0).speed == LOW_OBSTACLE_SPEED
+    # 急に 8 cm 先 → 止まる
+    c.set_clear(CLEAR_VALUE, 8.0, k.t, k.t)
+    x = k.run(DT, us=70.0)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear"

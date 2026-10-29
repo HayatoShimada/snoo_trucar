@@ -86,7 +86,10 @@ CLEAR_SKIP_US_OK_CM = 60.0
 # LOW_OBSTACLE_SPEED に落として LOW_OBSTACLE_CM だけ越える（2026-10-29、ラグの縁で止まっていた）
 LOW_OBSTACLE_GAP_CM = 25.0
 LOW_OBSTACLE_SPEED = 10.0
-LOW_OBSTACLE_CM = 20.0  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
+LOW_OBSTACLE_CM = 20.0
+# 越えるのは 1 歩に 1 回まで。越えている間に、画像の空きが（進んだ分を引いても）これより縮んだら止まる。
+# ソファ・ベッドの下のように上にかぶさる物は、超音波（低い）では先まで空いて見えるので取り違えうる
+LOW_OBSTACLE_SHRINK_CM = 5.0
 DRIVE_INDEX = -2
 # 走っている間のカメラ。サーバーが画像から通り道の空き（clear_cm）を出すので、少し下を向けて車の前を入れる
 # （HFOV 54° だと車幅が画面に入るのは、tilt -15° で前端から約 13 cm 先から）。曲がるときは曲がる方へ首を向ける
@@ -158,6 +161,7 @@ class Controller:
         self._ex_sched: list[float] = []
         self._ex_sched_stop = -1
         self._low_left = 0.0  # 低い物を越えている残りの距離（cm）
+        self._low_clear_cm = 0.0  # 越え始めたときの clear_cm
         self.low_passed = 0  # この 1 歩で低い物を越えた回数（次の station で伝える）
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
@@ -222,7 +226,7 @@ class Controller:
         self._ex_step = (0.0, [])
         self._ex_seg = 0
         self._ex_sched, self._ex_sched_stop = [], -1
-        self._low_left, self.low_passed = 0.0, 0
+        self._low_left, self.low_passed, self._low_clear_cm = 0.0, 0, 0.0
 
     def set_plan(self, plan) -> None:
         """サーバーの 1 歩（control_proc が plan の共有メモリから入れる）。返事を待っている station の分
@@ -458,13 +462,19 @@ class Controller:
             elif fwd and (us_cm is None or us_cm < ctl.explore_step_stop_cm):
                 reason = "ultrasonic"
             elif fwd and blocked == "near" and self._low_left <= 0:
-                if us_real is not None and us_real >= self.clear_cm + LOW_OBSTACLE_GAP_CM:
+                low = us_real is not None and us_real >= self.clear_cm + LOW_OBSTACLE_GAP_CM
+                if low and self.low_passed == 0:
                     # 画像では近いのに、超音波（床から 4.5 cm）はずっと先を見ている → 低い物（ラグの縁・
                     # ケーブル・敷居）。止まらずに遅くして越える。引っかかれば画像が動かなくなって止まる
                     self._low_left = LOW_OBSTACLE_CM
+                    self._low_clear_cm = self.clear_cm
                     self.low_passed += 1
                 else:
                     reason = "clear"
+            elif (fwd and self._low_left > 0 and self.clear_state == CLEAR_VALUE
+                  and self.clear_cm < self._low_clear_cm - (LOW_OBSTACLE_CM - self._low_left)
+                  - LOW_OBSTACLE_SHRINK_CM):  # fmt: skip
+                reason = "clear"  # 越えている物より手前に、別の物が見えた
             elif fwd and blocked == "unknown":
                 reason = "clear_unknown"
             elif skip_capped and self._skip_moved >= CLEAR_SKIP_MAX_CM:
