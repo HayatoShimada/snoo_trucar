@@ -450,8 +450,12 @@ def test_explore_scans_drives_and_turns():
             out.append(dataclasses.replace(c.step(est, S + int(t[0] * S), dt, us)))  # step は同じものを返す
         return out
 
+    from snoo_trucar.controller import scan_schedule
+
     n_poses = len(EXPLORE_PANS) * len(EXPLORE_TILTS)
-    cmds = run(n_poses * MAP_HOLD_S - 0.05, 200.0)
+    scan_s = scan_schedule(0.0, 0.0)[-1]
+    assert scan_s < n_poses * 0.65  # 1 向き 0.6 s ほど
+    cmds = run(scan_s - 0.05, 200.0)
     assert all(x.state == EXPLORE and x.speed == 0 for x in cmds)  # 止まって撮る
     assert {x.scan_index for x in cmds} == set(range(n_poses))
     cmds = run(0.5, 200.0)
@@ -474,7 +478,7 @@ def test_explore_scans_drives_and_turns():
     assert c2.step(est, S, dt, None).speed == 0 and c2._ex_phase == "drive"
     # 超音波がずっと測れなければ、前にも後ろにも動かない
     c3, _ = _controller("explore")
-    for k in range(int(3 * n_poses * MAP_HOLD_S / dt)):
+    for k in range(int(3 * scan_s / dt)):
         assert c3.step(est, S + int(k * dt * S), dt, None).speed == 0
     # snoo が遠くにいても探索は続ける。近くに見えたら止まってカメラで追うだけ
     _seen(est, S + int(t[0] * S), 10.0, 300.0)
@@ -593,7 +597,9 @@ def test_explore_asks_the_server_for_the_next_step():
             x = c.step(est, S + int(t[0] * S), dt, us)
         return x
 
-    scan_s = len(EXPLORE_PANS) * len(EXPLORE_TILTS) * MAP_HOLD_S
+    from snoo_trucar.controller import scan_schedule
+
+    scan_s = scan_schedule(30.0, 0.0)[-1]  # 首が 30° 振れていても足りるように（先頭の待ちが長い分）
     x = run(scan_s + 0.05)
     assert c.station_wait == 0 and x.speed == 0  # 撮り終えて、サーバーの返事を待つ
     assert run(5.0).speed == 0

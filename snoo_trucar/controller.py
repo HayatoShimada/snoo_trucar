@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -36,6 +37,29 @@ MAP_HOLD_S = 1.6
 # explore で止まるたびに撮る向き（間取りには水平とやや下が要る）
 EXPLORE_PANS = (-30.0, -15.0, 0.0, 15.0, 30.0)
 EXPLORE_TILTS = (-15.0, 0.0)
+# 段ごとに折り返す（2 段目は右から左）。隣の向きとの差がいつも 15° 以内になる
+EXPLORE_POSES = tuple(
+    (p, t) for k, t in enumerate(EXPLORE_TILTS) for p in (EXPLORE_PANS if k % 2 == 0 else EXPLORE_PANS[::-1])
+)
+# explore で向きを変えてから撮るまでの待ち = BASE + PER_DEG × 角度の差。指令は滑らかにせず、すぐ書く。
+# 撮ったら（CAPTURE_S の間に 1 枚）次の向きへ。これまでは 1 向き 1.6 s 固定で、1 か所 16 s かかっていた
+SCAN_SETTLE_BASE_S = 0.35
+SCAN_SETTLE_PER_DEG_S = 0.01
+SCAN_CAPTURE_S = 0.12
+
+
+def scan_settle_s(delta_deg: float) -> float:
+    return SCAN_SETTLE_BASE_S + SCAN_SETTLE_PER_DEG_S * abs(delta_deg)
+
+
+def scan_schedule(pan0: float, tilt0: float) -> list[float]:
+    """explore の 1 か所の撮影で、各向きを終える時刻（撮り始めからの秒）"""
+    ends, t, prev = [], 0.0, (pan0, tilt0)
+    for p, ti in EXPLORE_POSES:
+        t += scan_settle_s(max(abs(p - prev[0]), abs(ti - prev[1]))) + SCAN_CAPTURE_S
+        ends.append(t)
+        prev = (p, ti)
+    return ends
 # 超音波の -1（反響なし）は、前が 3.4 m より遠くまで空いているときにも出る（robot_hat の待ちが 20 ms）。
 # この間に 1 度でも測れていれば、センサーは生きているとみなし、-1 を遠い（EXPLORE_FAR_CM）として扱う。
 # 1 度も測れていなければ（外れている・壊れている）、前にも後ろにも動かない
@@ -117,6 +141,8 @@ class Controller:
         self.last_step = (0.0, 0)  # 直前の 1 歩の (秒, STOP_REASONS の番号)
         self._ex_step: tuple[float, list[tuple[float, float]]] = (0.0, [])  # (速さ, [(ハンドル, cm)])
         self._ex_seg = 0
+        self._ex_sched: list[float] = []
+        self._ex_sched_stop = -1
         self._low_left = 0.0  # 低い物を越えている残りの距離（cm）
         self.low_passed = 0  # この 1 歩で低い物を越えた回数（次の station で伝える）
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
@@ -210,6 +236,11 @@ class Controller:
         )
         cmd.guard = self.guard.state
 
+        if state == EXPLORE and self._ex_phase == "scan":
+            # 撮るために止まって向きを変えるときは、滑らかにせずすぐ書く（サーボは自分の速さで回る）
+            cmd.pan = clip(pan_goal, car.pan_min, car.pan_max)
+            cmd.tilt = clip(tilt_goal, car.tilt_min, car.tilt_max)
+            pan_goal, tilt_goal = cmd.pan, cmd.tilt
         # カメラは目標に一次遅れで寄せ、速さも抑える
         max_step = self.PAN_RATE * dt
         cmd.pan = clip(
@@ -305,8 +336,11 @@ class Controller:
         elif self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
             us_cm = EXPLORE_FAR_CM
         if self._ex_phase == "scan":
-            poses =[(p, t) for t in EXPLORE_TILTS for p in EXPLORE_PANS]
-            i = int(self._ex_t / MAP_HOLD_S)
+            poses = EXPLORE_POSES
+            if self._ex_sched_stop != self._ex_stop:
+                self._ex_sched_stop = self._ex_stop
+                self._ex_sched = scan_schedule(self.cmd.pan, self.cmd.tilt)
+            i = bisect.bisect_right(self._ex_sched, self._ex_t)
             if i < len(poses):
                 self.cmd.scan_index = self._ex_stop * len(poses) + i
                 return (*poses[i], 0.0, 0.0)

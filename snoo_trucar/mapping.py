@@ -25,6 +25,8 @@ class MapRecorder:
         self.mode = "map"
         self._last_drive = -1e9
         self._drive_n = 0
+        self._pose = (0.0, 0.0)  # 直前のフレームのときの向き（指令）
+        self._settle = SETTLE_S
 
     def offer(self, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm: float | None) -> None:
         """カメラの 1 フレームごとに呼ぶ。cmd は制御プロセスの出力（control_proc.CMD_N）"""
@@ -46,15 +48,25 @@ class MapRecorder:
         now = time.monotonic()
         if index == DRIVE_INDEX:
             self._index = index
+            self._pose = (float(cmd[3]), float(cmd[4]))
             if now - self._last_drive >= 1.0 / DRIVE_FPS:
                 self._last_drive = now
                 self._drive_n += 1
                 self._save(f"d{self._drive_n:05d}", t_ns, jpeg, cmd, ultrasonic_cm, moving=True)
             return
+        pose = (float(cmd[3]), float(cmd[4]))
         if index != self._index:
-            self._index, self._since = index, now
+            settle = SETTLE_S
+            if mode == "explore":
+                # 向きの差に合わせて待つ（controller.scan_schedule と同じ）
+                from .controller import scan_settle_s
+
+                settle = scan_settle_s(max(abs(pose[0] - self._pose[0]), abs(pose[1] - self._pose[1])))
+            self._index, self._since, self._settle = index, now, settle
+            self._pose = pose
             return
-        if index in self._saved or now - self._since < SETTLE_S:
+        self._pose = pose
+        if index in self._saved or now - self._since < self._settle:
             return
         self._save(f"{index:02d}", t_ns, jpeg, cmd, ultrasonic_cm, moving=False)
         self._saved.add(index)
