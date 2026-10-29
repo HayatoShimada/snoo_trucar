@@ -141,3 +141,45 @@ def test_server_step_limits_a_long_clear_skip():
     c2.set_clear(CLEAR_SKIP, -1.0, k2.t, k2.t)
     x = k2.run(2.0, us=150.0)
     assert x.speed == 15.0
+
+
+def test_stale_ultrasonic_never_counts_as_far():
+    """超音波が古い（スレッドが止まった・測れていない）ときは、-1 と違って前に進まない"""
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c._ex_phase = "drive"
+    assert k.run(0.1, us=200.0).speed > 0
+    c.us_stale = True  # 制御プロセスが、300 ms より新しい超音波が無いと判断した
+    x = k.run(0.05, us=None)
+    assert x.speed <= 0
+    # サーバーの 1 歩でも止まる
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    c2.set_clear(0, -1.0, k2.t)
+    k2.run(0.1, us=200.0)
+    assert _server_step(c2, k2).speed > 0
+    c2.us_stale = True
+    assert k2.run(0.05, us=None).speed == 0 and STOP_REASONS[c2.last_step[1]] == "ultrasonic"
+
+
+def test_no_echo_is_far_only_just_after_a_real_reading():
+    """-1（反響なし）を遠いとみなすのは、1 s 以内に測れていたときだけ"""
+    from snoo_trucar.controller import EXPLORE_US_TRUST_S
+
+    assert EXPLORE_US_TRUST_S <= 1.0
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(0, -1.0, k.t)
+    k.run(0.1, us=200.0)
+    assert _server_step(c, k).speed > 0
+    assert k.run(0.5, us=None).speed > 0  # 測れたばかり → 遠くまで空いているとみなす
+    x = k.run(0.6, us=None)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "ultrasonic"
+
+
+def test_control_proc_marks_old_ultrasonic_as_stale():
+    from snoo_trucar.control_proc import US_MAX_AGE_NS, us_is_stale
+
+    assert us_is_stale(S, 0)  # まだ 1 度も来ていない
+    assert not us_is_stale(S + US_MAX_AGE_NS, S)
+    assert us_is_stale(S + US_MAX_AGE_NS + 1, S)

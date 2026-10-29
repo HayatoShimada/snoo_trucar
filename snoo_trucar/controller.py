@@ -62,8 +62,10 @@ def scan_schedule(pan0: float, tilt0: float) -> list[float]:
     return ends
 # 超音波の -1（反響なし）は、前が 3.4 m より遠くまで空いているときにも出る（robot_hat の待ちが 20 ms）。
 # この間に 1 度でも測れていれば、センサーは生きているとみなし、-1 を遠い（EXPLORE_FAR_CM）として扱う。
-# 1 度も測れていなければ（外れている・壊れている）、前にも後ろにも動かない
-EXPLORE_US_TRUST_S = 60.0
+# 1 度も測れていなければ（外れている・壊れている）、前にも後ろにも動かない。
+# 60 s では、間に置かれた物を見落としたまま長く走れた（snoo_trucar#21 の B）。今は 1 s。
+# 測った値が古い（us_stale: スレッドが止まった・読めない）のは -1 と違い、いつも分からない（進まない）
+EXPLORE_US_TRUST_S = 1.0
 EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
@@ -139,6 +141,7 @@ class Controller:
         self._ex_us_at = -1e9
         self._ex_turns = 0
         self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）
+        self.us_stale = False  # 超音波の新しい値（-1 を含む）が来ていない。control_proc が入れる
         # サーバーが画像から出す通り道の空き（protocol.Reply.clear_cm）
         self.clear_state, self.clear_cm = CLEAR_ABSENT, -1.0
         self._clear_null_since: int | None = None  # null・古いが始まった時刻
@@ -380,7 +383,7 @@ class Controller:
         us_real = us_cm  # 実際に測れた値（-1 を遠いとみなす前）
         if us_cm is not None:
             self._ex_us_at = self._ex_total
-        elif self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
+        elif not self.us_stale and self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
             us_cm = EXPLORE_FAR_CM
         if self._ex_phase == "scan":
             poses = EXPLORE_POSES
@@ -493,6 +496,9 @@ class Controller:
             self._ex_phase, self._ex_t = "scan", 0.0  # 画像の判定が届かない。止まってその場で撮り直す
             return 0.0, 0.0, 0.0, 0.0
         if self._ex_phase == "drive":
+            if us_cm is None and self.us_stale:
+                self._ex_phase, self._ex_t = "scan", 0.0  # 超音波が届かない。前が分からないので止まる
+                return 0.0, 0.0, 0.0, 0.0
             if us_cm is None or us_cm < ctl.explore_clear_cm:
                 self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0
             else:
@@ -521,10 +527,11 @@ class Controller:
             self._ex_t = 0.0
             if us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm:
                 self._ex_phase, self._ex_moved = "drive", 0.0
-            elif self._ex_turns < EXPLORE_MAX_TURNS:
+            elif us_cm is not None and self._ex_turns < EXPLORE_MAX_TURNS:
                 self._ex_phase = "back"
             else:
-                self._ex_phase = "scan"  # 一回りしても空いていない。ここで撮り直す
+                # 一回りしても空いていない・超音波が分からない。ここで撮り直す
+                self._ex_phase = "scan"
         return 0.0, 0.0, 0.0, 0.0
 
     def _ex_local_next(self, us_cm: float | None) -> bool:

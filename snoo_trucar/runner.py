@@ -206,7 +206,12 @@ class Runner:
             # explore では -1 が「前が遠くまで空いている」の意味にもなるので、あけすぎない
             retry = 0.2 if self.current_mode() == "explore" else self.cfg.car.ultrasonic_retry_s
             wait = period if fails < 20 else retry
-            time.sleep(max(0.0, wait - (time.monotonic() - t0)))
+            # 長く待つ間に explore に替わったら、すぐ測り直す（古いままだと explore は前に進まない）
+            while not self.stop.is_set():
+                left = wait - (time.monotonic() - t0)
+                if left <= 0 or (wait > 0.2 and self.current_mode() == "explore"):
+                    break
+                time.sleep(min(left, 0.2))
 
     def _battery_loop(self, car) -> None:
         low_v = self.cfg.car.battery_low_v

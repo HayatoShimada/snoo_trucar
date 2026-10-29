@@ -37,8 +37,13 @@ CLEAR_N = 3
 #       (steer_deg, distance_cm) × controller.MAX_SEGMENTS（曲がってからまっすぐ、など）
 PLAN_N = 10
 CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（分からない = controller.CLEAR_STALE）
-US_MAX_AGE_NS = 300_000_000
+US_MAX_AGE_NS = 300_000_000  # これより古い超音波（-1 を含む）は、スレッドが止まった・読めないとみなす
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
+
+
+def us_is_stale(now_ns: int, us_t_ns: int) -> bool:
+    """超音波の最後の 1 回（-1 も含む）が来ていない・古い。-1（反響なし）とは分けて扱う"""
+    return us_t_ns == 0 or now_ns - us_t_ns > US_MAX_AGE_NS
 
 
 def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str,
@@ -87,7 +92,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 us_t, cm = int(r[1][0]), r[1][1]
                 us_cm = cm if cm > 0 else None
                 controller.stuck = bool(r[1][2])
-            if us_cm is not None and now - us_t > US_MAX_AGE_NS:
+            controller.us_stale = us_is_stale(now, us_t)
+            if us_cm is not None and controller.us_stale:
                 us_cm = None
 
             if clear_buf is not None:
