@@ -800,3 +800,24 @@ def test_link_remembers_cat_boxes_by_capture_time():
     finally:
         link.close()
         meas.close()
+
+
+def test_low_battery_shuts_down_after_hold(monkeypatch):
+    from types import SimpleNamespace
+
+    from snoo_trucar import runner as R
+
+    calls = []
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **k: calls.append(args) or SimpleNamespace(returncode=0, stderr=""))
+    monkeypatch.setattr(R.os, "sync", lambda: None)
+    r = R.Runner(Config(), sim=True, quiet=True)
+    car = SimpleNamespace(stop=lambda: calls.append("stop"))
+    hold = r.cfg.car.shutdown_hold_s
+    assert not r._low_battery_shutdown(0.0, 0.0, car)  # 入っていない（Pi は別の電源）
+    assert not r._low_battery_shutdown(7.5, 1.0, car)
+    assert not r._low_battery_shutdown(6.2, 2.0, car)
+    assert not r._low_battery_shutdown(6.5, 3.0, car)  # 戻った → 数え直し
+    assert not r._low_battery_shutdown(6.2, 4.0, car)
+    assert not r._low_battery_shutdown(6.2, 4.0 + hold - 0.1, car)
+    assert r._low_battery_shutdown(6.2, 4.0 + hold, car)
+    assert calls == ["stop", ["sudo", "-n", "/usr/sbin/shutdown", "-h", "now"]] and r.stop.is_set()

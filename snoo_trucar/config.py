@@ -168,6 +168,11 @@ class CarConfig:
     # 0 V 近くは電池が入っていない・スイッチが切れている（サーボもモーターも動かない）
     battery_low_v: float = 6.6
     battery_check_s: float = 5.0
+    # 電池がこれより低いのが shutdown_hold_s 続いたら、Pi を shutdown する（Pi も車の電池から給電していると、
+    # 切れたときに電源ごと落ちて SD カードが壊れる。2026-10-29 に 2 回）。0 で使わない。
+    # sudo で shutdown をパスワードなしで呼べるようにしておく（deploy/sudoers-snoo-shutdown）
+    shutdown_v: float = 6.4
+    shutdown_hold_s: float = 10.0
     pan_min: float = -35.0
     pan_max: float = 35.0
     tilt_min: float = -35.0

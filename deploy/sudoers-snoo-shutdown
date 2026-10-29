@@ -1,0 +1,3 @@
+# 電池が少ないとき、snoo_trucar が Pi を shutdown できるようにする（snoo_trucar/runner.py の _low_battery_shutdown）。
+# 入れ方: sudo install -m 440 deploy/sudoers-snoo-shutdown /etc/sudoers.d/020_snoo_shutdown && sudo visudo -c
+hacopi ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now

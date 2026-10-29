@@ -10,6 +10,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import signal
+import subprocess
 import threading
 import time
 import traceback
@@ -72,6 +73,7 @@ class Runner:
         self.motion = None  # MotionWatch（実機のときだけ）
         self.recorder = None
         self.station = None
+        self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
 
@@ -254,6 +256,29 @@ class Runner:
                     break
                 time.sleep(min(left, 0.2))
 
+    def _low_battery_shutdown(self, volts: float | None, now: float, car) -> bool:
+        """電池が shutdown_v より低いのが続いたら、止めて Pi を shutdown する。したら True"""
+        c = self.cfg.car
+        if c.shutdown_v <= 0 or volts is None or volts < BATTERY_NONE_V or volts >= c.shutdown_v:
+            self._low_since = None  # 入っていない（Pi は別の電源）・足りている
+            return False
+        if self._low_since is None:
+            self._low_since = now
+        if now - self._low_since < c.shutdown_hold_s:
+            return False
+        print(f"電池が {volts:.2f} V（{c.shutdown_v} V より低い）。SD カードを守るため Pi を shutdown する", flush=True)
+        car.stop()
+        if self.recorder is not None:
+            self.recorder.finish()
+        os.sync()
+        r = subprocess.run(["sudo", "-n", "/usr/sbin/shutdown", "-h", "now"], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"shutdown できなかった（{r.stderr.strip()}）。deploy/sudoers-snoo-shutdown を入れる", flush=True)
+            self._low_since = None
+            return False
+        self.stop.set()
+        return True
+
     def _battery_loop(self, car) -> None:
         low_v = self.cfg.car.battery_low_v
         errors = ErrorLog("電池")
@@ -263,6 +288,8 @@ class Runner:
             except Exception as e:
                 errors(e)
                 self.battery_v = None  # 測れないときは止めない（battery_state）
+            if self._low_battery_shutdown(self.battery_v, time.monotonic(), car):
+                return
             label, ok = battery_state(self.battery_v, low_v)
             if ok != self.battery[1] and not self.quiet:
                 print(label, flush=True)
