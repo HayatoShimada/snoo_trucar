@@ -779,3 +779,24 @@ def test_real_link_idle_interval():
     finally:
         link.close()
         meas.close()
+
+
+def test_link_remembers_cat_boxes_by_capture_time():
+    from snoo_trucar import control_proc
+    from snoo_trucar.link import RECENT_DETS_N, Link
+
+    cfg = Config()
+    cfg.server.host = cfg.server.fallback_host = "127.0.0.1"
+    meas = SeqBuffer(control_proc.MEAS_N)
+    link = Link(cfg, meas)
+    try:
+        det = {"box": [0.1, 0.2, 0.3, 0.6], "cat": 0.9, "snoo": 0.9}
+        link._on_packet(make_reply(1, 111, 5.0, [det]))
+        (d,) = link.recent_dets[111]
+        assert d["box"] == [0.1, 0.2, 0.3, 0.6] and d["cat"] == 0.9
+        for t in range(RECENT_DETS_N + 5):
+            link._on_packet(make_reply(2, 1000 + t, 5.0, []))
+        assert 111 not in link.recent_dets and len(link.recent_dets) == RECENT_DETS_N
+    finally:
+        link.close()
+        meas.close()

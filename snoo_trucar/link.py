@@ -15,6 +15,9 @@ from .protocol import pack_frame, parse_reply, pick_snoo
 from .shm import SeqBuffer
 
 
+RECENT_DETS_N = 600  # 撮った時刻ごとの猫の箱を覚えておく数（60 fps で 10 s）
+
+
 @dataclass
 class LinkStats:
     sent: int = 0
@@ -129,6 +132,9 @@ class Link:
         self.pose_fn = None
         # 返事に clear_cm の欄か clear_skip があったら呼ぶ（reply）。explore の記録に残して、超音波と比べるため
         self.on_clear = None
+        # 撮った時刻 → その画像の猫の箱。station で止まって撮った画像に付けて送る（地図のサーバーが、
+        # 猫の所の点を地図に入れないように。動いた snoo が壁として残らない）
+        self.recent_dets: dict[int, list[dict]] = {}
         # 今の行動を返す関数。待機（idle）のときは cfg.server.idle_fps でしか送らない
         self.mode_fn = None
         self._frames: dict[int, bytes] = {}
@@ -195,6 +201,16 @@ class Link:
         except (ValueError, KeyError, TypeError, AttributeError):
             return  # 壊れた返事
         self.route.on_reply(now)
+        # 撮った時刻ごとの猫の箱（station の画像に付ける）。古いものは捨てる
+        dets = self.recent_dets
+        dets[reply.t_capture_ns] = [
+            {"box": [round(b.cx - b.w / 2, 4), round(b.cy - b.h / 2, 4),
+                     round(b.cx + b.w / 2, 4), round(b.cy + b.h / 2, 4)], "cat": b.cat}
+            for b in reply.boxes
+        ]  # fmt: skip
+        if len(dets) > RECENT_DETS_N:
+            for t in sorted(dets)[: len(dets) - RECENT_DETS_N]:
+                dets.pop(t, None)
         if self.trace is not None:
             self.trace.mark(reply.t_capture_ns, "reply", now)
         with self._lock:

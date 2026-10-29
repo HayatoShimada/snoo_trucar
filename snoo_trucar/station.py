@@ -49,7 +49,15 @@ class StationClient:
                 self._post(k, v, rec)
 
     def _post(self, k: int, v, rec) -> None:
-        entries = [e for e in list(rec.entries) if e.get("station") == k]
+        entries = [dict(e) for e in list(rec.entries) if e.get("station") == k]
+        link = getattr(self.runner, "link", None)
+        if link is not None:
+            # 止まって撮った画像に、その画像の検出の猫の箱を付ける（無ければ付けない）
+            for e in entries:
+                if not e.get("moving"):
+                    d = link.recent_dets.get(e.get("t_capture_ns"))
+                    if d is not None:
+                        e["dets"] = d
         prev = None
         if k > 0:
             secs, reason = float(v[19]), STOP_REASONS[int(v[20])]

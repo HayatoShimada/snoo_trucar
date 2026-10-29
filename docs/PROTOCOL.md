@@ -92,6 +92,8 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
   加えて `session_id`（explore_日時）、`station_id`（0, 1, …）、`prev_step`（`{steer_deg, speed, seconds, est_distance_cm, stop_reason}`、
   最初は null、Pi だけで決めた後は `{"stop_reason": "local"}`。`speed` は Pi が上限で抑えた後の速さ、`segments` は実際に走った区切りまで
   （止まった区切りは止まった所まで）、`est_distance_cm` は guard・電池を通した後の速さで数えた距離。待たされた間は進んだことにしない）、`battery_v`、`ultrasonic_cm`、`camera_height_cm`（8.0、ユーザーが測った）
+- 止まって撮った画像（`moving` でない）の `frames[i].dets` に、その画像の検出の猫の箱 `[{"box": [x1, y1, x2, y2], "cat"}]` を付ける
+  （撮った時刻で返事と突き合わせる。返事が無ければ付けない）。地図のサーバーは、その中の点を地図に入れない
 - `images`: 1 枚ずつ。ファイル名は `frames[].file`
 - 返事: `{"action": "move", "steer_deg", "speed", "distance_cm", "pose": {x, y, yaw_deg}}` か `{"action": "done", "reason"}`。
   meta の `"supports": ["reverse", "segments"]` を見て、サーバーは次も返す: `"reverse": true`（同じハンドルで下がる。30 cm まで）、
