@@ -260,3 +260,66 @@ def test_stop_command_stops_the_motors_without_the_main_process(tmp_path, monkey
     assert cli.main(["stop"]) == 1
     unit = (Path(__file__).resolve().parents[1] / "deploy" / "snoo-trucar.service").read_text()
     assert "ExecStopPost=" in unit and "snoo_trucar stop" in unit
+
+
+class RecCar:
+    def __init__(self):
+        self.log = []
+
+    def apply(self, steer, speed, pan, tilt):
+        self.log.append(("apply", speed))
+
+    def stop(self):
+        self.log.append(("stop",))
+
+
+class TornCmd:
+    """制御プロセスが書いている途中で死んだ（seqlock が奇数のまま）: 初めの n 回だけ読める"""
+
+    def __init__(self, n, speed=20.0):
+        self.n, self.speed = n, speed
+
+    def read(self):
+        import time
+
+        if self.n <= 0:
+            return None
+        self.n -= 1
+        from snoo_trucar.control_proc import CMD_N
+
+        v = [0.0] * CMD_N
+        v[0], v[2], v[14] = time.monotonic_ns(), self.speed, 5
+        return 1, v
+
+
+def test_actuator_stops_when_the_command_cannot_be_read():
+    """cmd が読めないまま（書いている途中で止まった）でも、古くなったら止める"""
+    from snoo_trucar.config import Config
+    from snoo_trucar.runner import Runner
+
+    cfg = Config()
+    r = Runner(cfg, seconds=0.4, quiet=True)
+    car = RecCar()
+    r._actuate_loop(car, TornCmd(3))
+    assert ("apply", 20.0) in car.log
+    last_apply = max(i for i, e in enumerate(car.log) if e[0] == "apply")
+    assert ("stop",) in car.log[last_apply:]
+
+
+def test_actuator_stops_and_fails_when_the_control_process_died():
+    import pytest
+
+    from snoo_trucar.config import Config
+    from snoo_trucar.runner import ControlDied, Runner
+
+    class Dead:
+        exitcode = -9
+
+        def is_alive(self):
+            return False
+
+    r = Runner(Config(), seconds=1.0, quiet=True)
+    car = RecCar()
+    with pytest.raises(ControlDied):
+        r._actuate_loop(car, TornCmd(100), Dead())
+    assert car.log[-1] == ("stop",) and not any(e[0] == "apply" for e in car.log)

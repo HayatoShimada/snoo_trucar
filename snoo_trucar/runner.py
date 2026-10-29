@@ -22,7 +22,11 @@ from .guard import GUARD_NAMES, OK
 from .shm import SeqBuffer
 from .trace import Trace
 
-CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古ければ止める
+CMD_STALE_NS = 100_000_000  # 制御プロセスの出力がこれより古ければ・これだけ読めなければ止める
+
+
+class ControlDied(RuntimeError):
+    """制御プロセスが死んだ。止めてから、0 でない終了コードで抜ける（systemd が起動し直す）"""
 BATTERY_NONE_V = 1.0  # これより低ければ電池が入っていない・スイッチが切れている
 
 
@@ -171,7 +175,7 @@ class Runner:
             t.start()
 
         try:
-            self._actuate_loop(car, cmd)
+            self._actuate_loop(car, cmd, proc)
         finally:
             self.stop.set()
             proc_stop.set()
@@ -232,9 +236,10 @@ class Runner:
             self.battery = (label, ok)
             self.stop.wait(self.cfg.car.battery_check_s)
 
-    def _actuate_loop(self, car, cmd: SeqBuffer) -> None:
+    def _actuate_loop(self, car, cmd: SeqBuffer, proc=None) -> None:
         period = 1.0 / self.cfg.car.actuator_hz
         start = time.monotonic()
+        last_ok = start  # 新しい cmd を最後に読めた時刻
         nxt = start
         last_print = last_trace = 0.0
         prev = None
@@ -247,21 +252,26 @@ class Runner:
             if trace is not None and prev is not None:
                 trace.loop("書き込みの周期", (now - prev) * 1000)
             prev = now
+            if proc is not None and not proc.is_alive():
+                car.stop()
+                raise ControlDied(f"制御プロセスが止まった（exitcode={proc.exitcode}）")
             r = cmd.read()
-            if r is not None:
+            # 読めない（書いている途中で制御プロセスが止まると、ずっと None になる）のも、古いのと同じ
+            fresh = r is not None and time.monotonic_ns() - int(r[1][0]) <= CMD_STALE_NS
+            if not fresh and (r is not None or now - last_ok > CMD_STALE_NS * 1e-9):
+                car.stop()  # 制御プロセスが止まった・遅れている
+            if fresh:
                 v = r[1]
-                if time.monotonic_ns() - int(v[0]) > CMD_STALE_NS:
-                    car.stop()  # 制御プロセスが止まった
-                else:
-                    # 電池が少ない・入っていないときは走らない（首は動かす）
-                    car.apply(v[1], v[2] if self.battery[1] else 0.0, v[3], v[4])
-                    self.last_cmd = v
-                    self._record(now - start, v)
-                    # 新しい検出を使ったコマンドを初めて書いた
-                    if trace is not None and int(v[15]) and int(v[15]) != applied_capture:
-                        applied_capture = int(v[15])
-                        trace.mark(applied_capture, "used", int(v[16]))
-                        trace.mark(applied_capture, "applied")
+                last_ok = now
+                # 電池が少ない・入っていないときは走らない（首は動かす）
+                car.apply(v[1], v[2] if self.battery[1] else 0.0, v[3], v[4])
+                self.last_cmd = v
+                self._record(now - start, v)
+                # 新しい検出を使ったコマンドを初めて書いた
+                if trace is not None and int(v[15]) and int(v[15]) != applied_capture:
+                    applied_capture = int(v[15])
+                    trace.mark(applied_capture, "used", int(v[16]))
+                    trace.mark(applied_capture, "applied")
             if not self.quiet and now - last_print >= 0.5 and self.last_cmd is not None:
                 last_print = now
                 print(self._status(self.last_cmd), flush=True)
