@@ -466,9 +466,15 @@ def test_explore_scans_drives_and_turns():
     assert cmds[-1].speed > 0 and cmds[-1].steer == 0
     cmds = run(ctl.explore_step_cm / (ctl.explore_speed * c.car.cm_s_per_speed) + 0.1, 200.0)
     assert cmds[-1].speed == 0 and cmds[-1].scan_index == n_poses  # 次の場所で撮り始める
+    # -1（反響なし）は、少し前まで測れていたなら遠くまで空いているとみなして進む
+    c2, _ = _controller("explore")
+    c2._ex_us_at = 0.0
+    c2._ex_phase, c2._ex_t = "check", 1.0
+    assert c2.step(est, S, dt, None).speed == 0 and c2._ex_phase == "drive"
     # 超音波がずっと測れなければ、前にも後ろにも動かない
-    cmds = run(3 * n_poses * MAP_HOLD_S, None)
-    assert all(x.speed == 0 for x in cmds)
+    c3, _ = _controller("explore")
+    for k in range(int(3 * n_poses * MAP_HOLD_S / dt)):
+        assert c3.step(est, S + int(k * dt * S), dt, None).speed == 0
     # snoo が遠くにいても探索は続ける。近くに見えたら止まってカメラで追うだけ
     _seen(est, S + int(t[0] * S), 10.0, 300.0)
     assert c.step(est, S + int(t[0] * S), dt, 200.0).state == EXPLORE

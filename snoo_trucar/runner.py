@@ -163,8 +163,10 @@ class Runner:
             self.last_us = cm
             us.write((time.monotonic_ns(), cm if cm is not None else -1.0))
             fails = 0 if cm is not None else fails + 1
-            # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける
-            wait = period if fails < 20 else self.cfg.car.ultrasonic_retry_s
+            # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける。
+            # explore では -1 が「前が遠くまで空いている」の意味にもなるので、あけすぎない
+            retry = 0.2 if self.current_mode() == "explore" else self.cfg.car.ultrasonic_retry_s
+            wait = period if fails < 20 else retry
             time.sleep(max(0.0, wait - (time.monotonic() - t0)))
 
     def _battery_loop(self, car) -> None:

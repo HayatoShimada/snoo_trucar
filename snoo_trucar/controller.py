@@ -36,7 +36,11 @@ MAP_HOLD_S = 1.6
 # explore で止まるたびに撮る向き（間取りには水平とやや下が要る）
 EXPLORE_PANS = (-30.0, -15.0, 0.0, 15.0, 30.0)
 EXPLORE_TILTS = (-15.0, 0.0)
-EXPLORE_US_FRESH_S = 5.0  # 超音波がこの間に 1 度も測れていなければ、下がって向きを変えることもしない
+# 超音波の -1（反響なし）は、前が 3.4 m より遠くまで空いているときにも出る（robot_hat の待ちが 20 ms）。
+# この間に 1 度でも測れていれば、センサーは生きているとみなし、-1 を遠い（EXPLORE_FAR_CM）として扱う。
+# 1 度も測れていなければ（外れている・壊れている）、前にも後ろにも動かない
+EXPLORE_US_TRUST_S = 60.0
+EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
 DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
@@ -245,8 +249,10 @@ class Controller:
         self._ex_t += dt
         if us_cm is not None:
             self._ex_us_at = self._ex_total
+        elif self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
+            us_cm = EXPLORE_FAR_CM
         if self._ex_phase == "scan":
-            poses = [(p, t) for t in EXPLORE_TILTS for p in EXPLORE_PANS]
+            poses =[(p, t) for t in EXPLORE_TILTS for p in EXPLORE_PANS]
             i = int(self._ex_t / MAP_HOLD_S)
             if i < len(poses):
                 self.cmd.scan_index = self._ex_stop * len(poses) + i
@@ -256,7 +262,7 @@ class Controller:
             clear = us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm
             if clear:
                 self._ex_phase = "drive"
-            elif self._ex_total - self._ex_us_at <= EXPLORE_US_FRESH_S:
+            elif us_cm is not None:
                 self._ex_phase, self._ex_turns = "back", 0
             else:
                 # 超音波がずっと測れない（壊れている・つながっていない）。前も見えないので動かず、その場で撮り直す
