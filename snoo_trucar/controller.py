@@ -43,6 +43,7 @@ EXPLORE_US_TRUST_S = 60.0
 EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
+CLEAR_NULL_STOP_NS = 300_000_000  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
 DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
 
 
@@ -87,8 +88,30 @@ class Controller:
         self._ex_turn_dir = 1.0
         self._ex_us_at = -1e9
         self._ex_turns = 0
-        self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）  # 超音波が最後に測れた時刻（explore の経過時間）
+        self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）
+        # サーバーが画像から出す通り道の空き（protocol.Reply.clear_cm）
+        self.clear_state, self.clear_cm = 0, -1.0
+        self._clear_null_since: int | None = None
+        self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
+
+    def set_clear(self, state: int, cm: float, now_ns: int) -> None:
+        """state 0: 欄が無い（使わない）/ 1: 値がある / 2: null（間に合わなかった）"""
+        if state == 2:
+            if self._clear_null_since is None:
+                self._clear_null_since = now_ns
+        else:
+            self._clear_null_since = None
+        self.clear_state, self.clear_cm = state, cm
+
+    def clear_blocked(self) -> str | None:
+        """走っている間に、画像の通り道の空きから止まるべきか。理由を返す"""
+        ctl = self.ctl
+        if self.clear_state == 1 and self.clear_cm < ctl.explore_clear_stop_cm:
+            return "near"
+        if self._clear_null_since is not None and self._now_ns - self._clear_null_since >= CLEAR_NULL_STOP_NS:
+            return "unknown"
+        return None
 
     def observe_stress(self, stress: float | None) -> None:
         self.guard.observe_stress(stress)
@@ -106,6 +129,7 @@ class Controller:
 
     def step(self, est: TargetEstimator, now_ns: int, dt: float, ultrasonic_cm: float | None):
         ctl, car, cmd = self.ctl, self.car, self.cmd
+        self._now_ns = now_ns
         since = est.since_seen_s(now_ns)
         cmd.scan_index = -1
         if self.mode == "idle":
@@ -275,6 +299,12 @@ class Controller:
             self._ex_phase = "check" if self._ex_phase == "back" else "back"
             self._ex_t = 0.0
             self.stuck = False  # 次の判定はメインプロセスが改めて出す
+        blocked = self.clear_blocked() if self._ex_phase in ("drive", "fwd") else None
+        if blocked == "near":
+            self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0  # 画像で前が近い
+        elif blocked == "unknown":
+            self._ex_phase, self._ex_t = "scan", 0.0  # 画像の判定が届かない。止まってその場で撮り直す
+            return 0.0, 0.0, 0.0, 0.0
         if self._ex_phase == "drive":
             if us_cm is None or us_cm < ctl.explore_clear_cm:
                 self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0

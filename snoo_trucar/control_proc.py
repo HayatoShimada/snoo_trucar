@@ -28,12 +28,15 @@ MODE_N = 1
 #      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
 #      guard（guard.OK / BACKOFF / HOLD / REST）
 CMD_N = 18
+# clear: t_capture_ns, cm, state（0: 返事に欄が無い / 1: 値がある / 2: null。protocol.Reply）
+CLEAR_N = 3
+CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（欄が無いのと同じ）
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
 
 
 def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str,
-        stop_event) -> None:  # fmt: skip
+        stop_event, clear_name: str | None = None) -> None:  # fmt: skip
     ctl = cfg.control
     if ctl.cpu >= 0:
         try:
@@ -42,6 +45,9 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             pass
     meas, us, out = SeqBuffer(MEAS_N, meas_name), SeqBuffer(US_N, us_name), SeqBuffer(CMD_N, cmd_name)
     mode_buf = SeqBuffer(MODE_N, mode_name)
+    clear_buf = SeqBuffer(CLEAR_N, clear_name) if clear_name else None
+    last_clear = 0
+    clear_t = 0
     est = TargetEstimator(cfg.camera.hfov_deg, cfg.camera.vfov_deg, ctl.distance_k)
     controller = Controller(ctl, cfg.car)
     period = int(1e9 / ctl.rate_hz)
@@ -73,6 +79,16 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 controller.stuck = bool(r[1][2])
             if us_cm is not None and now - us_t > US_MAX_AGE_NS:
                 us_cm = None
+
+            if clear_buf is not None:
+                r = clear_buf.read()
+                if r is not None and r[0] != last_clear:
+                    last_clear = r[0]
+                    clear_t = int(r[1][0])
+                    controller.set_clear(int(r[1][2]), r[1][1], now)
+                if clear_t and now - clear_t > CLEAR_MAX_AGE_NS:
+                    clear_t = 0
+                    controller.set_clear(0, -1.0, now)
 
             r = mode_buf.read()
             if r is not None and r[0] != last_mode:
@@ -124,4 +140,6 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
         meas.close()
         us.close()
         mode_buf.close()
+        if clear_buf is not None:
+            clear_buf.close()
         out.close()

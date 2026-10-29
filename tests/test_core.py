@@ -541,3 +541,37 @@ def test_explore_backs_off_when_stuck():
     c.stuck = True  # 進めていない
     x = c.step(est, S, 0.01, 200.0)
     assert x.speed < 0 and c._ex_phase == "back"
+
+
+def test_sno2_header_and_clear_cm():
+    import json
+
+    data = pack_frame(7, 123, 640, 480, b"jpg", (10.0, -15.0, 5.0, -2.0))
+    assert data[:4] == b"SNO2"
+    assert unpack_frame(data) == (7, 123, 640, 480, b"jpg")
+    r = parse_reply(make_reply(1, 2, 3.0, []))
+    assert not r.clear_present  # 欄が無い → 止めない
+    msg = json.loads(make_reply(1, 2, 3.0, []))
+    msg["clear_cm"] = None
+    r = parse_reply(json.dumps(msg).encode())
+    assert r.clear_present and r.clear_cm is None
+    msg["clear_cm"], msg["clear_conf"] = 42.0, 0.8
+    r = parse_reply(json.dumps(msg).encode())
+    assert r.clear_cm == 42.0 and r.clear_conf == 0.8
+
+
+def test_explore_uses_image_clearance():
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    c._ex_us_at = 0.0
+    c._ex_phase = "drive"
+    c.set_clear(0, -1.0, S)  # 欄が無い → 超音波だけで進む
+    assert c.step(est, S, 0.01, 200.0).speed > 0
+    c.set_clear(1, ctl.explore_clear_stop_cm + 50, S)
+    assert c.step(est, S, 0.01, 200.0).speed > 0
+    c.set_clear(1, ctl.explore_clear_stop_cm - 5, S)  # 画像で前が近い → 向きを変える
+    assert c.step(est, S, 0.01, 200.0).speed < 0 and c._ex_phase == "back"
+    c._ex_phase = "drive"
+    c.set_clear(2, -1.0, S)  # null が 0.3 s 続いたら止まって撮り直す
+    assert c.step(est, S + int(0.1 * S), 0.01, 200.0).speed > 0
+    assert c.step(est, S + int(0.35 * S), 0.01, 200.0).speed == 0 and c._ex_phase == "scan"

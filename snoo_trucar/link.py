@@ -104,7 +104,8 @@ class Route:
 class Link:
     SEEN_GAP_NS = 10_000_000_000  # 見つけたときの写真は 10 秒に 1 枚まで
 
-    def __init__(self, cfg: Config, meas: SeqBuffer, seen_dir: Path | None = None, trace=None):
+    def __init__(self, cfg: Config, meas: SeqBuffer, seen_dir: Path | None = None, trace=None,
+                 clear: SeqBuffer | None = None):  # fmt: skip
         self.cfg = cfg
         self.meas = meas
         self.trace = trace  # trace.Trace（無ければ測らない）
@@ -121,6 +122,10 @@ class Link:
                                cfg.control.coast_s)  # fmt: skip
         # 追い始めたときの画像と箱を残す（snoo を本当に見ていたかを後から人が確かめるため）
         self.seen_dir = seen_dir
+        # 通り道の空き（clear_cm）を制御プロセスへ。control_proc.CLEAR_N
+        self.clear = clear
+        # 撮った時刻に書いていた指令 (steer_deg, speed, pan_deg, tilt_deg) を返す関数（SNO2 に載せる）
+        self.pose_fn = None
         self._frames: dict[int, bytes] = {}
         self._last_seen_save = 0
 
@@ -135,7 +140,8 @@ class Link:
     def send(self, t_capture_ns: int, jpeg: bytes) -> None:
         cam = self.cfg.camera
         self._seq = (self._seq + 1) & 0xFFFFFFFF
-        data = pack_frame(self._seq, t_capture_ns, cam.width, cam.height, jpeg)
+        pose = self.pose_fn() if self.cfg.server.header_v2 and self.pose_fn is not None else None
+        data = pack_frame(self._seq, t_capture_ns, cam.width, cam.height, jpeg, pose)
         with self._lock:
             self.stats._in_flight[self._seq] = time.monotonic_ns()
             if self.seen_dir is not None:
@@ -190,6 +196,11 @@ class Link:
                 if now - reply.t_capture_ns > timeout_ns:
                     st.dropped += 1
                     continue
+            if self.clear is not None:
+                # 0: 欄が無い（超音波だけで走る）/ 1: 値がある / 2: null（間に合わなかった）
+                state = 0 if not reply.clear_present else 1 if reply.clear_cm is not None else 2
+                cm = reply.clear_cm if reply.clear_cm is not None else -1.0
+                self.clear.write((reply.t_capture_ns, cm, state))
             box, score = pick_snoo(
                 reply.boxes, ctl.cat_threshold, ctl.snoo_threshold, ctl.require_snoo,
                 ctl.max_box_area,

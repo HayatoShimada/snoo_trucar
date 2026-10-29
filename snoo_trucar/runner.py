@@ -66,12 +66,13 @@ class Runner:
         us = SeqBuffer(control_proc.US_N)
         cmd = SeqBuffer(control_proc.CMD_N)
         self.mode_buf = mode = SeqBuffer(control_proc.MODE_N)
+        clear = SeqBuffer(control_proc.CLEAR_N)
         self.set_mode(cfg.control.mode)
         ctx = mp.get_context("fork")
         proc_stop = ctx.Event()
         proc = ctx.Process(
             target=control_proc.run,
-            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop),
+            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name),
             name="snoo-control",
             daemon=True,
         )
@@ -108,7 +109,13 @@ class Runner:
             if cfg.trace_dir:
                 trace_path = Path(cfg.trace_dir).expanduser() / time.strftime("trace_%Y%m%d_%H%M%S.jsonl")
             self.trace = Trace(trace_path)
-            self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser(), self.trace)
+            self.link = Link(cfg, meas, Path(cfg.seen_dir).expanduser(), self.trace, clear)
+
+            def pose():
+                v = self.last_cmd
+                return (0.0, 0.0, 0.0, 0.0) if v is None else (v[1], v[2], v[3], v[4])
+
+            self.link.pose_fn = pose
             recorder = self.recorder = MapRecorder(Path(cfg.map_dir).expanduser())
 
             from .motion import MotionWatch, shrink
@@ -159,7 +166,7 @@ class Runner:
                 self.link.close()
             if self.trace is not None:
                 self.trace.close()
-            for b in (meas, us, cmd, mode):
+            for b in (meas, us, cmd, mode, clear):
                 b.close()
 
     def set_mode(self, mode: str) -> None:

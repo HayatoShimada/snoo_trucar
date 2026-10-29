@@ -11,14 +11,31 @@ HEADER = struct.Struct("<4sIQHH")  # magic, seq, t_capture_ns, width, height
 MAX_DATAGRAM = 65000
 
 
-def pack_frame(seq: int, t_capture_ns: int, width: int, height: int, jpeg: bytes) -> bytes:
-    data = HEADER.pack(MAGIC, seq & 0xFFFFFFFF, t_capture_ns, width, height) + jpeg
+# 版 2: 撮った時刻に書いていた指令も付ける（走っている間の通り道の空き clear_cm をサーバーが出すため）
+MAGIC2 = b"SNO2"
+HEADER2 = struct.Struct("<4sIQHHffffB")  # + steer_deg, speed, pan_deg, tilt_deg, flags
+FLAG_MOVING, FLAG_REVERSING = 1, 2
+
+
+def pack_frame(seq: int, t_capture_ns: int, width: int, height: int, jpeg: bytes,
+               pose: tuple[float, float, float, float] | None = None) -> bytes:  # fmt: skip
+    """pose = (steer_deg, speed, pan_deg, tilt_deg) を渡すと版 2（SNO2）"""
+    if pose is None:
+        data = HEADER.pack(MAGIC, seq & 0xFFFFFFFF, t_capture_ns, width, height) + jpeg
+    else:
+        steer, speed, pan, tilt = pose
+        flags = (FLAG_MOVING if abs(speed) > 0.5 else 0) | (FLAG_REVERSING if speed < -0.5 else 0)
+        data = HEADER2.pack(MAGIC2, seq & 0xFFFFFFFF, t_capture_ns, width, height,
+                            steer, speed, pan, tilt, flags) + jpeg  # fmt: skip
     if len(data) > MAX_DATAGRAM:
         raise ValueError(f"JPEG が大きすぎる: {len(data)} bytes")
     return data
 
 
 def unpack_frame(data: bytes) -> tuple[int, int, int, int, bytes]:
+    if data[:4] == MAGIC2:
+        magic, seq, t_ns, w, h, *_ = HEADER2.unpack_from(data)
+        return seq, t_ns, w, h, data[HEADER2.size :]
     magic, seq, t_ns, w, h = HEADER.unpack_from(data)
     if magic != MAGIC:
         raise ValueError("magic が違う")
@@ -42,6 +59,11 @@ class Reply:
     t_capture_ns: int
     infer_ms: float
     boxes: list[Box]
+    # 走っている間の通り道の空き（cm）。欄が無い = サーバーが出していない（超音波だけで走る）。
+    # 欄があって null = 出そうとしたが間に合わなかった
+    clear_present: bool = False
+    clear_cm: float | None = None
+    clear_conf: float | None = None
 
 
 def parse_reply(data: bytes) -> Reply:
@@ -64,7 +86,11 @@ def parse_reply(data: bytes) -> Reply:
                 stress=None if stress is None else float(stress),
             )
         )
-    return Reply(int(msg["seq"]), int(msg["t_capture_ns"]), float(msg.get("infer_ms", 0)), boxes)
+    clear = msg.get("clear_cm")
+    conf = msg.get("clear_conf")
+    return Reply(int(msg["seq"]), int(msg["t_capture_ns"]), float(msg.get("infer_ms", 0)), boxes,
+                 "clear_cm" in msg, None if clear is None else float(clear),
+                 None if conf is None else float(conf))  # fmt: skip
 
 
 def make_reply(seq: int, t_capture_ns: int, infer_ms: float, dets: list[dict]) -> bytes:

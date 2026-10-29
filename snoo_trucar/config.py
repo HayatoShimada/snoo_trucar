@@ -51,6 +51,8 @@ class ServerConfig:
     max_in_flight: int = 2
     # これより古い返事は捨てる
     reply_timeout_s: float = 0.5
+    # 画像に撮った時刻の指令を付ける版 2（SNO2）で送る（サーバーは 2026-10-29 19:52 から読める）
+    header_v2: bool = True
 
 
 @dataclass
@@ -121,7 +123,10 @@ class ControlConfig:
     explore_clear_cm: float = 50.0
     explore_turn_s: float = 1.5
     explore_max_s: float = 600.0
-    explore_snoo_near_cm: float = 150.0  # snoo がこれより近くに見えたら止まって見守る
+    explore_snoo_near_cm: float = 150.0
+    # サーバーが画像から出す通り道の空き（clear_cm）がこれより近ければ、進むのをやめて向きを変える。
+    # 止まるまでの距離（未測定）+ 余裕 15 cm
+    explore_clear_stop_cm: float = 25.0  # snoo がこれより近くに見えたら止まって見守る
     # snoo を怖がらせない決まり（guard.py）。設定ファイルでは [control.guard]
     guard: GuardConfig = field(default_factory=GuardConfig)
 

@@ -24,6 +24,24 @@ snoo かどうかを判定し、結果を返す。遅れを小さくするため
 
 Python では `struct.Struct("<4sIQHH")`（`snoo_trucar/protocol.py`）。
 
+### 版 2（SNO2、既定）
+
+撮った時刻に書いていた指令を足した 37 バイトのヘッダー。サーバーは SNO1 も SNO2 も読む（2026-10-29 19:52 から）。
+`config.toml` の `[server] header_v2 = false` で SNO1 に戻せる。
+
+| オフセット | 型 | 内容 |
+| --- | --- | --- |
+| 0 | 4 bytes | `SNO2` |
+| 4〜19 | | SNO1 と同じ（seq・撮った時刻・幅・高さ） |
+| 20 | float32 | ハンドル（度、右が +） |
+| 24 | float32 | 速さ（picarx の -100..100、前が +） |
+| 28 | float32 | パン（度、右が +） |
+| 32 | float32 | チルト（度、上が +。較正後は 0 が水平） |
+| 36 | uint8 | flags。bit0 = 走っている、bit1 = 下がっている |
+| 37 | … | JPEG |
+
+`struct.Struct("<4sIQHHffffB")`。値は指令で、サーボやモーターの実際の値ではない。
+
 ## サーバー → Pi（検出結果）
 
 UTF-8 の JSON 1 つ。
@@ -50,6 +68,7 @@ UTF-8 の JSON 1 つ。
 | `dets[].cat` | 猫である確からしさ（0..1） |
 | `dets[].snoo` | snoo である確からしさ（0..1）。判定できないときは `null`（Pi 側は `require_snoo = false` で猫なら追う） |
 | `dets[].play` | 任意。遊びの様子 `{"state": "stalk", "p": {"attention", "stalk", "pounce", "bored", "stress"}}`（各 0..1）。判定できないときは `null` か省く。Pi は今 `p.stress` だけを使う（`snoo_trucar/guard.py`: 0.8 以上を 1 回、0.5 以上を 3 回続けて見たら止まって下がる） |
+| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える |
 
 Pi は `cat ≥ 0.35` かつ `snoo ≥ 0.6` の中から `cat × snoo` が最大の箱を snoo とみなす（`config.toml` の `[control]` で変えられる）。
 
