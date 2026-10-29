@@ -68,7 +68,7 @@ UTF-8 の JSON 1 つ。
 | `dets[].cat` | 猫である確からしさ（0..1） |
 | `dets[].snoo` | snoo である確からしさ（0..1）。判定できないときは `null`（Pi 側は `require_snoo = false` で猫なら追う） |
 | `dets[].play` | 任意。遊びの様子 `{"state": "stalk", "p": {"attention", "stalk", "pounce", "bored", "stress"}}`（各 0..1）。判定できないときは `null` か省く。Pi は今 `p.stress` だけを使う（`snoo_trucar/guard.py`: 0.8 以上を 1 回、0.5 以上を 3 回続けて見たら止まって下がる） |
-| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える。大きく曲がっていて通り道が画面に入らないとき・下がっているときは欄を出さず、`clear_skip`（`"out_of_view"` / `"reversing"`）を出す |
+| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える。大きく曲がっていて通り道が画面に入らないとき・下がっているときは欄を出さず、`clear_skip`（`"out_of_view"` / `"reversing"`）を出す。サーバーの 1 歩では、返事が 0.5 s 途切れた（clear_cm が古い）のも null と同じに扱う。`clear_skip` が続く間は止めないが、超音波が 60 cm より先を測れていなければ速さ 10・20 cm まで |
 
 Pi は `cat ≥ 0.35` かつ `snoo ≥ 0.6` の中から `cat × snoo` が最大の箱を snoo とみなす（`config.toml` の `[control]` で変えられる）。
 
@@ -98,6 +98,6 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
   `prev_step` には `reverse` と、走った `segments` も入れる。
   Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、前に進むときは超音波（`explore_step_stop_cm`、30 cm）・clear_cm、
   どちらの向きでも画像が動かないときは途中で止める
-  （`stop_reason`: done / ultrasonic / clear / clear_unknown / stuck）
+  （`stop_reason`: done / ultrasonic / clear / clear_unknown / stuck / clear_skip）
 - 20 s で返事が無い・失敗したら、Pi だけで次を決める（超音波で前が空いていれば進み、塞がっていれば切り返す）
 - 地図は `GET http://192.168.0.248:8720/v1/snoo/map/<session_id>/topdown.png`

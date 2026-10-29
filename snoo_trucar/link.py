@@ -206,8 +206,12 @@ class Link:
                     st.dropped += 1
                     continue
             if self.clear is not None:
-                # 0: 欄が無い（超音波だけで走る）/ 1: 値がある / 2: null（間に合わなかった）
-                state = 0 if not reply.clear_present else 1 if reply.clear_cm is not None else 2
+                # controller.CLEAR_*。0: 欄が無い（超音波だけで走る）/ 1: 値がある / 2: null（間に合わなかった）/
+                # 3: clear_skip（出せない理由がある。止めないが、続けば遅く・短く）
+                if reply.clear_present:
+                    state = 1 if reply.clear_cm is not None else 2
+                else:
+                    state = 3 if reply.clear_skip else 0
                 cm = reply.clear_cm if reply.clear_cm is not None else -1.0
                 self.clear.write((reply.t_capture_ns, cm, state))
             if self.on_clear is not None and (reply.clear_present or reply.clear_skip):

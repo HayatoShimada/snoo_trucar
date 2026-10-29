@@ -13,7 +13,7 @@ import os
 import time
 
 from .config import Config
-from .controller import MODES, Controller, ego_yaw_rate
+from .controller import CLEAR_STALE, MODES, Controller, ego_yaw_rate
 from .estimator import Detection, TargetEstimator
 from .shm import SeqBuffer
 
@@ -30,12 +30,13 @@ MODE_N = 1
 #      station_wait（サーバーの返事を待っている station、-1 で待っていない）, last_step_s, last_step_reason,
 #      ex_station（explore で今の station。走っている間は次の station）, low_passed（直前の 1 歩で低い物を越えた回数）
 CMD_N = 23
-# clear: t_capture_ns, cm, state（0: 返事に欄が無い / 1: 値がある / 2: null。protocol.Reply）
+# clear: t_capture_ns, cm, state（controller.CLEAR_*。0: 返事に欄が無い / 1: 値がある / 2: null /
+#        3: clear_skip。protocol.Reply）
 CLEAR_N = 3
 # plan: station, action（controller.PLAN_*）, speed（負なら下がる）, 区切りの数,
 #       (steer_deg, distance_cm) × controller.MAX_SEGMENTS（曲がってからまっすぐ、など）
 PLAN_N = 10
-CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（欄が無いのと同じ）
+CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（分からない = controller.CLEAR_STALE）
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
 
@@ -54,9 +55,11 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
     last_clear = 0
     plan_buf = SeqBuffer(PLAN_N, plan_name) if plan_name else None
     last_plan = 0
-    clear_t = 0
     est = TargetEstimator(cfg.camera.hfov_deg, cfg.camera.vfov_deg, ctl.distance_k)
     controller = Controller(ctl, cfg.car)
+    if clear_buf is not None:
+        # 返事がまだ来ていないのは、途切れているのと同じ（サーバーの 1 歩では 0.3 s で止まる）
+        controller.set_clear(CLEAR_STALE, -1.0, time.monotonic_ns())
     period = int(1e9 / ctl.rate_hz)
     last_meas = last_us = last_mode = 0
     us_cm: float | None = None
@@ -91,11 +94,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 r = clear_buf.read()
                 if r is not None and r[0] != last_clear:
                     last_clear = r[0]
-                    clear_t = int(r[1][0])
-                    controller.set_clear(int(r[1][2]), r[1][1], now)
-                if clear_t and now - clear_t > CLEAR_MAX_AGE_NS:
-                    clear_t = 0
-                    controller.set_clear(0, -1.0, now)
+                    controller.set_clear(int(r[1][2]), r[1][1], now, int(r[1][0]))
+                controller.age_clear(now, CLEAR_MAX_AGE_NS)
 
             if plan_buf is not None:
                 r = plan_buf.read()

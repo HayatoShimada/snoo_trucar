@@ -77,3 +77,67 @@ def test_station_drops_the_answer_when_explore_changed(tmp_path):
         assert plan.read()[0] == 1
     finally:
         plan.close()
+
+
+def _server_step(c, k, cm=80.0, speed=12.0):
+    """サーバーの 1 歩（まっすぐ cm）を走り始める"""
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan((0, PLAN_MOVE, speed, 1, 0.0, cm, 0, 0, 0, 0))
+    return k.run(DT)
+
+
+def test_server_step_stops_when_clear_goes_stale():
+    """返事が途切れて clear_cm が古くなったら、null と同じく 0.3 s で止まる（欄が無いのと同じにしない）"""
+    from snoo_trucar.controller import CLEAR_STALE, CLEAR_VALUE
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    assert _server_step(c, k).speed > 0
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    assert k.run(0.6).speed > 0
+    c.age_clear(k.t, int(0.5 * S))  # 最後の返事（撮った時刻）から 0.6 s
+    assert c.clear_state == CLEAR_STALE
+    assert k.run(0.2).speed > 0
+    x = k.run(0.15)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear_unknown"
+    # 返事がまだ 1 度も来ていない（制御プロセスの初め）も古いのと同じ。走り出してから 0.3 s で止まる
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    c2.set_clear(CLEAR_STALE, -1.0, k2.t)
+    k2.run(1.0)
+    assert _server_step(c2, k2).speed > 0
+    assert k2.run(0.25).speed > 0
+    assert k2.run(0.1).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear_unknown"
+
+
+def test_pi_only_drive_ignores_stale_clear():
+    """Pi だけの探索（サーバーに届かない）では、古い clear_cm は今までどおり超音波だけで走る"""
+    from snoo_trucar.controller import CLEAR_STALE
+
+    c, ctl, est = _explore()
+    c._ex_us_at = 0.0
+    c._ex_phase = "drive"
+    c.set_clear(CLEAR_STALE, -1.0, S)
+    assert c.step(est, S + S, DT, 200.0).speed > 0
+
+
+def test_server_step_limits_a_long_clear_skip():
+    """clear_skip（出せない）が続く間は止めないが、速さ 10・20 cm まで。超音波が 60 cm より先なら上限なし"""
+    from snoo_trucar.controller import CLEAR_SKIP, CLEAR_SKIP_MAX_CM, CLEAR_SKIP_SPEED
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    _server_step(c, k, cm=80.0, speed=15.0)
+    c.set_clear(CLEAR_SKIP, -1.0, k.t, k.t)
+    v = CLEAR_SKIP_SPEED * c.car.cm_s_per_speed
+    x = k.run(CLEAR_SKIP_MAX_CM / v - 0.1, us=50.0)
+    assert x.speed == CLEAR_SKIP_SPEED
+    x = k.run(0.2, us=50.0)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear_skip"
+    # 超音波が新しく 60 cm より先 → 上限なし
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    _server_step(c2, k2, cm=80.0, speed=15.0)
+    c2.set_clear(CLEAR_SKIP, -1.0, k2.t, k2.t)
+    x = k2.run(2.0, us=150.0)
+    assert x.speed == 15.0

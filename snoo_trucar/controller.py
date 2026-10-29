@@ -70,8 +70,16 @@ EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなけ�
 EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待って来なければ、Pi だけで決める（サーバーは 20 s で返す）
 PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
 MAX_SEGMENTS = 3  # サーバーの 1 歩の区切り（segments）の数の上限
-STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck")
+STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck", "clear_skip")
 CLEAR_NULL_STOP_NS = 300_000_000
+# 画像の通り道の空き（clear_cm）の状態。ABSENT は返事に欄が無い（clear_cm を出さないサーバー）、
+# SKIP は clear_skip（settling・out_of_view・reversing で出せない）、STALE は返事が途切れて古い・まだ来ていない
+CLEAR_ABSENT, CLEAR_VALUE, CLEAR_NULL, CLEAR_SKIP, CLEAR_STALE = 0, 1, 2, 3, 4
+# clear_skip が続く間は止めないが、見えていないので遅くし、続けて走る距離にも上限を付ける。
+# 超音波が新しく CLEAR_SKIP_US_OK_CM より先を測れているときは、上限を付けない
+CLEAR_SKIP_SPEED = 10.0
+CLEAR_SKIP_MAX_CM = 20.0
+CLEAR_SKIP_US_OK_CM = 60.0
 # clear_cm が近くても、超音波がそれより LOW_OBSTACLE_GAP_CM 以上先なら低い物とみなし、
 # LOW_OBSTACLE_SPEED に落として LOW_OBSTACLE_CM だけ越える（2026-10-29、ラグの縁で止まっていた）
 LOW_OBSTACLE_GAP_CM = 25.0
@@ -132,8 +140,11 @@ class Controller:
         self._ex_turns = 0
         self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）
         # サーバーが画像から出す通り道の空き（protocol.Reply.clear_cm）
-        self.clear_state, self.clear_cm = 0, -1.0
-        self._clear_null_since: int | None = None
+        self.clear_state, self.clear_cm = CLEAR_ABSENT, -1.0
+        self._clear_null_since: int | None = None  # null・古いが始まった時刻
+        self._clear_t = 0  # 今の clear を撮った時刻（古さを見る）
+        self._skip_moved = 0.0  # clear_skip が続いている間に進んだ距離（cm）
+        self._step_start_ns = 0  # サーバーの 1 歩を走り始めた時刻
         # サーバーが決める探索（explore_server）。station_wait は返事を待っている station（-1 で待っていない）。
         # plan は control_proc が入れる (station, action, steer_deg, speed, distance_cm)
         self.station_wait = -1
@@ -148,22 +159,37 @@ class Controller:
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
-    def set_clear(self, state: int, cm: float, now_ns: int) -> None:
-        """state 0: 欄が無い（使わない）/ 1: 値がある / 2: null（間に合わなかった）"""
-        if state == 2:
+    def set_clear(self, state: int, cm: float, now_ns: int, t_capture_ns: int = 0) -> None:
+        """state は CLEAR_*。t_capture_ns はその返事の画像を撮った時刻（age_clear で古さを見る）"""
+        if state in (CLEAR_NULL, CLEAR_STALE):
             if self._clear_null_since is None:
                 self._clear_null_since = now_ns
         else:
             self._clear_null_since = None
         self.clear_state, self.clear_cm = state, cm
+        self._clear_t = t_capture_ns
 
-    def clear_blocked(self) -> str | None:
-        """走っている間に、画像の通り道の空きから止まるべきか。理由を返す"""
+    def age_clear(self, now_ns: int, max_age_ns: int) -> None:
+        """撮ってから max_age_ns より古い clear は、分からない（STALE）にする"""
+        if self._clear_t and now_ns - self._clear_t > max_age_ns:
+            self.set_clear(CLEAR_STALE, -1.0, now_ns)
+
+    def clear_blocked(self, strict: bool = False) -> str | None:
+        """走っている間に、画像の通り道の空きから止まるべきか。理由を返す。
+
+        strict はサーバーの 1 歩を走っているとき。サーバーが画像を見ている前提なので、返事が途切れた
+        （STALE）のも null と同じく分からないとする。Pi だけの探索では、サーバーに届かないのが普通なので
+        STALE は欄が無いのと同じ（超音波だけで走る）"""
         ctl = self.ctl
-        if self.clear_state == 1 and self.clear_cm < ctl.explore_clear_stop_cm:
+        if self.clear_state == CLEAR_VALUE and self.clear_cm < ctl.explore_clear_stop_cm:
             return "near"
-        if self._clear_null_since is not None and self._now_ns - self._clear_null_since >= CLEAR_NULL_STOP_NS:
-            return "unknown"
+        unknown = self.clear_state == CLEAR_NULL or (strict and self.clear_state == CLEAR_STALE)
+        if unknown and self._clear_null_since is not None:
+            since = self._clear_null_since
+            if strict:
+                since = max(since, self._step_start_ns)  # 走り始めてから 0.3 s は待つ（撮ったばかりなので）
+            if self._now_ns - since >= CLEAR_NULL_STOP_NS:
+                return "unknown"
         return None
 
     def observe_stress(self, stress: float | None) -> None:
@@ -399,6 +425,7 @@ class Controller:
                     self._ex_step = (-speed if back else speed, segs)
                     self._ex_phase, self._ex_t, self._ex_moved, self._ex_seg = "step", 0.0, 0.0, 0
                     self._low_left, self.low_passed = 0.0, 0
+                    self._step_start_ns, self._skip_moved = self._now_ns, 0.0
                 elif not self._ex_local_next(us_cm):  # サーバーに届かない → Pi だけの探索
                     return 0.0, 0.0, 0.0, 0.0
             elif self._ex_t >= EXPLORE_PLAN_TIMEOUT_S:
@@ -416,12 +443,18 @@ class Controller:
                 self._ex_seg, self._ex_moved = self._ex_seg + 1, 0.0  # 次の区切りへ
             steer = segs[self._ex_seg][0] if self._ex_seg < len(segs) else 0.0
             fwd = speed > 0
+            blocked = self.clear_blocked(strict=True)
+            skip = fwd and self.clear_state == CLEAR_SKIP
+            if not skip:
+                self._skip_moved = 0.0
+            # clear_skip の間は画像で前を見ていない。超音波が遠くまで空いていなければ遅く・短く
+            skip_capped = skip and not (us_real is not None and us_real > CLEAR_SKIP_US_OK_CM)
             reason = None
             if self.stuck:
                 reason, self.stuck = "stuck", False
             elif fwd and (us_cm is None or us_cm < ctl.explore_step_stop_cm):
                 reason = "ultrasonic"
-            elif fwd and self.clear_blocked() == "near" and self._low_left <= 0:
+            elif fwd and blocked == "near" and self._low_left <= 0:
                 if us_real is not None and us_real >= self.clear_cm + LOW_OBSTACLE_GAP_CM:
                     # 画像では近いのに、超音波（床から 4.5 cm）はずっと先を見ている → 低い物（ラグの縁・
                     # ケーブル・敷居）。止まらずに遅くして越える。引っかかれば画像が動かなくなって止まる
@@ -429,8 +462,10 @@ class Controller:
                     self.low_passed += 1
                 else:
                     reason = "clear"
-            elif fwd and self.clear_blocked() == "unknown":
+            elif fwd and blocked == "unknown":
                 reason = "clear_unknown"
+            elif skip_capped and self._skip_moved >= CLEAR_SKIP_MAX_CM:
+                reason = "clear_skip"
             elif self._ex_seg >= len(segs):
                 reason = "done"
             if reason is not None:
@@ -440,6 +475,10 @@ class Controller:
             if self._low_left > 0:
                 speed = min(speed, LOW_OBSTACLE_SPEED)
                 self._low_left -= speed * car.cm_s_per_speed * dt
+            if skip_capped:
+                speed = min(speed, CLEAR_SKIP_SPEED)
+            if skip:
+                self._skip_moved += speed * car.cm_s_per_speed * dt
             self._ex_moved += abs(speed) * car.cm_s_per_speed * dt
             return (_drive_pan(steer) if fwd else 0.0), DRIVE_TILT, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
