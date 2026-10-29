@@ -37,6 +37,8 @@ MAP_HOLD_S = 1.6
 EXPLORE_PANS = (-30.0, -15.0, 0.0, 15.0, 30.0)
 EXPLORE_TILTS = (-15.0, 0.0)
 EXPLORE_US_FRESH_S = 5.0  # 超音波がこの間に 1 度も測れていなければ、下がって向きを変えることもしない
+EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
+EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
 DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
 
 
@@ -79,7 +81,8 @@ class Controller:
         self._ex_total = 0.0
         self._ex_moved = 0.0
         self._ex_turn_dir = 1.0
-        self._ex_us_at = -1e9  # 超音波が最後に測れた時刻（explore の経過時間）
+        self._ex_us_at = -1e9
+        self._ex_turns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
     def observe_stress(self, stress: float | None) -> None:
@@ -254,7 +257,7 @@ class Controller:
             if clear:
                 self._ex_phase = "drive"
             elif self._ex_total - self._ex_us_at <= EXPLORE_US_FRESH_S:
-                self._ex_phase = "turn"
+                self._ex_phase, self._ex_turns = "back", 0
             else:
                 # 超音波がずっと測れない（壊れている・つながっていない）。前も見えないので動かず、その場で撮り直す
                 self._ex_phase = "scan"
@@ -262,19 +265,37 @@ class Controller:
         self.cmd.scan_index = DRIVE_INDEX
         if self._ex_phase == "drive":
             if us_cm is None or us_cm < ctl.explore_clear_cm:
-                self._ex_phase, self._ex_t = "turn", 0.0
+                self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0
             else:
                 self._ex_moved += ctl.explore_speed * car.cm_s_per_speed * dt
                 if self._ex_moved >= ctl.explore_step_cm:
+                    # 新しい場所に着いた。次に向きを変えるときは逆回りにして、片寄らないようにする
+                    self._ex_turn_dir = -self._ex_turn_dir
                     self._ex_phase, self._ex_t = "scan", 0.0
                     return 0.0, 0.0, 0.0, 0.0
                 return 0.0, 0.0, 0.0, ctl.explore_speed
-        if self._ex_phase == "turn":
-            # 前が塞がっている。ハンドルを切って下がり、向きを変える（後ろは見えないので短く）
+        # 前が塞がっている。切り返しで同じ向きに回り続ける（ハンドルを切って下がる → 逆に切って進む）。
+        # 下がるのは後ろが見えないので短く。進む間は超音波が近ければやめる
+        d = self._ex_turn_dir * car.steer_max
+        if self._ex_phase == "back":
             if self._ex_t < ctl.explore_turn_s:
-                return 0.0, 0.0, self._ex_turn_dir * car.steer_max, -ctl.explore_speed
-            self._ex_turn_dir = -self._ex_turn_dir
-            self._ex_phase, self._ex_t = "scan", 0.0
+                return 0.0, 0.0, d, -ctl.explore_speed
+            self._ex_phase, self._ex_t = "fwd", 0.0
+        if self._ex_phase == "fwd":
+            if self._ex_t < ctl.explore_turn_s and us_cm is not None and us_cm >= ctl.explore_clear_cm:
+                return 0.0, 0.0, -d, ctl.explore_speed
+            self._ex_phase, self._ex_t = "check", 0.0
+        if self._ex_phase == "check":
+            if self._ex_t < EXPLORE_CHECK_S:  # 止まって超音波を測り直す
+                return 0.0, 0.0, 0.0, 0.0
+            self._ex_turns += 1
+            self._ex_t = 0.0
+            if us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm:
+                self._ex_phase, self._ex_moved = "drive", 0.0
+            elif self._ex_turns < EXPLORE_MAX_TURNS:
+                self._ex_phase = "back"
+            else:
+                self._ex_phase = "scan"  # 一回りしても空いていない。ここで撮り直す
         return 0.0, 0.0, 0.0, 0.0
 
     def _map(self, dt: float):

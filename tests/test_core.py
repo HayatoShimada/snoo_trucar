@@ -455,10 +455,16 @@ def test_explore_scans_drives_and_turns():
     assert {x.scan_index for x in cmds} == set(range(n_poses))
     cmds = run(0.5, 200.0)
     assert cmds[-1].speed > 0 and cmds[-1].scan_index == DRIVE_INDEX  # 前が空いていれば進む
-    # 前が塞がった → ハンドルを切って下がる
-    x = run(0.1, 30.0)[-1]
+    # 前が塞がった → 切り返しで回る（ハンドルを切って下がる → 逆に切って進む）
+    x = run(0.1, 40.0)[-1]
     assert x.speed < 0 and abs(x.steer) == c.car.steer_max
-    cmds = run(ctl.explore_turn_s + 0.1, 30.0)
+    back_steer = x.steer
+    x = run(ctl.explore_turn_s, 60.0)[-1]  # 進む間は 50 cm 以上空いていれば進む
+    assert x.speed > 0 and x.steer == -back_steer
+    # 前が空いたら、撮り直さずにそのまま進む
+    cmds = run(ctl.explore_turn_s + 0.5, 200.0)
+    assert cmds[-1].speed > 0 and cmds[-1].steer == 0
+    cmds = run(ctl.explore_step_cm / (ctl.explore_speed * c.car.cm_s_per_speed) + 0.1, 200.0)
     assert cmds[-1].speed == 0 and cmds[-1].scan_index == n_poses  # 次の場所で撮り始める
     # 超音波がずっと測れなければ、前にも後ろにも動かない
     cmds = run(3 * n_poses * MAP_HOLD_S, None)
