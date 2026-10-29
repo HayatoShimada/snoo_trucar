@@ -15,7 +15,7 @@ from .config import Config
 from .hal import FakeCar
 from .shm import SeqBuffer
 
-SPEED_CM_S = 1.0  # picarx の速さ 1 あたり（cm/s）。速さ 20 で 20 cm/s くらい
+SPEED_CM_S = 1.7  # picarx の速さ 1 あたり（cm/s）。2026-10-29 に VGGT の位置から
 WHEELBASE_CM = 14.0  # 前後の車軸の間（PiCar-X の URDF、cau-se/ARCHES-PiCar-X）
 
 

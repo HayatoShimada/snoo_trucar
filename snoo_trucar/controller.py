@@ -45,13 +45,14 @@ EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り�
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
 EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待って来なければ、Pi だけで決める（サーバーは 20 s で返す）
 PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
+MAX_SEGMENTS = 3  # サーバーの 1 歩の区切り（segments）の数の上限
 STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck")
 CLEAR_NULL_STOP_NS = 300_000_000  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
 DRIVE_INDEX = -2
 # 走っている間のカメラ。サーバーが画像から通り道の空き（clear_cm）を出すので、少し下を向けて車の前を入れる
 # （HFOV 54° だと車幅が画面に入るのは、tilt -15° で前端から約 13 cm 先から）。曲がるときは曲がる方へ首を向ける
 DRIVE_TILT = -15.0
-DRIVE_PAN_PER_STEER = 1.0
+DRIVE_PAN_PER_STEER = 1.5  # 曲がる弧の通り道が画面に長く入るように（home-linux の clear_cm）
 DRIVE_PAN_MAX = 30.0
 
 
@@ -109,7 +110,8 @@ class Controller:
         self.station_wait = -1
         self.plan = None
         self.last_step = (0.0, 0)  # 直前の 1 歩の (秒, STOP_REASONS の番号)
-        self._ex_step = (0.0, 0.0, 0.0)
+        self._ex_step: tuple[float, list[tuple[float, float]]] = (0.0, [])  # (速さ, [(ハンドル, cm)])
+        self._ex_seg = 0
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
@@ -319,10 +321,20 @@ class Controller:
                     self.set_mode("idle")  # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
                     return 0.0, 0.0, 0.0, 0.0
                 if action == PLAN_MOVE:
-                    speed = p[3] if 0 < p[3] <= ctl.explore_speed else ctl.explore_speed
-                    steer = max(-car.steer_max, min(car.steer_max, p[2]))
-                    self._ex_step = (steer, speed, min(p[4], ctl.explore_step_cm))
-                    self._ex_phase, self._ex_t, self._ex_moved = "step", 0.0, 0.0
+                    # 速さが負なら下がる（前に行ける所が無いとき、来た弧を同じハンドルで戻る。後ろは見えないので短く）
+                    back = p[2] < 0
+                    speed = abs(p[2]) if 0 < abs(p[2]) <= ctl.explore_speed else ctl.explore_speed
+                    # 区切りごとの距離は、合わせて 1 歩の上限まで（後ろは見えないので、下がるときはもっと短く）
+                    left = ctl.explore_reverse_max_cm if back else ctl.explore_step_cm
+                    segs = []
+                    for i in range(min(int(p[3]), MAX_SEGMENTS)):
+                        steer = max(-car.steer_max, min(car.steer_max, p[4 + 2 * i]))
+                        d = min(max(0.0, p[5 + 2 * i]), left)
+                        left -= d
+                        if d > 0:
+                            segs.append((steer, d))
+                    self._ex_step = (-speed if back else speed, segs)
+                    self._ex_phase, self._ex_t, self._ex_moved, self._ex_seg = "step", 0.0, 0.0, 0
                 elif not self._ex_local_next(us_cm):  # サーバーに届かない → Pi だけの探索
                     return 0.0, 0.0, 0.0, 0.0
             elif self._ex_t >= EXPLORE_PLAN_TIMEOUT_S:
@@ -333,25 +345,30 @@ class Controller:
                 return 0.0, 0.0, 0.0, 0.0
         self.cmd.scan_index = DRIVE_INDEX
         if self._ex_phase == "step":
-            # サーバーが決めた 1 歩（前向きの弧）。止まったら、理由を次の station で伝える
-            steer, speed, dist = self._ex_step
+            # サーバーが決めた 1 歩（弧）。止まったら、理由を次の station で伝える。
+            # 前の超音波と画像の空きは、前に進むときだけ見る（下がるときは、来た所を戻るだけ）
+            speed, segs = self._ex_step
+            while self._ex_seg < len(segs) and self._ex_moved >= segs[self._ex_seg][1]:
+                self._ex_seg, self._ex_moved = self._ex_seg + 1, 0.0  # 次の区切りへ
+            steer = segs[self._ex_seg][0] if self._ex_seg < len(segs) else 0.0
+            fwd = speed > 0
             reason = None
             if self.stuck:
                 reason, self.stuck = "stuck", False
-            elif us_cm is None or us_cm < ctl.explore_clear_cm:
+            elif fwd and (us_cm is None or us_cm < ctl.explore_step_stop_cm):
                 reason = "ultrasonic"
-            elif self.clear_blocked() == "near":
+            elif fwd and self.clear_blocked() == "near":
                 reason = "clear"
-            elif self.clear_blocked() == "unknown":
+            elif fwd and self.clear_blocked() == "unknown":
                 reason = "clear_unknown"
-            elif self._ex_moved >= dist:
+            elif self._ex_seg >= len(segs):
                 reason = "done"
             if reason is not None:
                 self.last_step = (self._ex_t, STOP_REASONS.index(reason))
                 self._ex_phase, self._ex_t = "scan", 0.0
                 return 0.0, 0.0, 0.0, 0.0
-            self._ex_moved += speed * car.cm_s_per_speed * dt
-            return _drive_pan(steer), DRIVE_TILT, steer, speed
+            self._ex_moved += abs(speed) * car.cm_s_per_speed * dt
+            return (_drive_pan(steer) if fwd else 0.0), DRIVE_TILT, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
             # ぶつかった・詰まった。進んでいたなら下がって向きを変え、下がっていたなら止まって測り直す
             self._ex_phase = "check" if self._ex_phase == "back" else "back"

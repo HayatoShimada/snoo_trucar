@@ -32,8 +32,9 @@ MODE_N = 1
 CMD_N = 22
 # clear: t_capture_ns, cm, state（0: 返事に欄が無い / 1: 値がある / 2: null。protocol.Reply）
 CLEAR_N = 3
-# plan: station, action（controller.PLAN_*）, steer_deg, speed, distance_cm
-PLAN_N = 5
+# plan: station, action（controller.PLAN_*）, speed（負なら下がる）, 区切りの数,
+#       (steer_deg, distance_cm) × controller.MAX_SEGMENTS（曲がってからまっすぐ、など）
+PLAN_N = 10
 CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（欄が無いのと同じ）
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ

@@ -131,6 +131,11 @@ class ControlConfig:
     explore_snoo_near_cm: float = 150.0
     # 次の 1 歩を home-linux の地図のサーバー（server.map_url）に決めてもらう。届かなければ Pi だけで決める
     explore_server: bool = True
+    # サーバーの 1 歩で、超音波がこれより近ければ止める。地図が障害物を避けた道を出すので、Pi だけで決めるとき
+    # （explore_clear_cm）より近くまで行く。clear_cm の 25 cm + 止まるまでの分
+    explore_step_stop_cm: float = 30.0
+    # サーバーの下がる 1 歩の上限（後ろは見えない）
+    explore_reverse_max_cm: float = 30.0
     # サーバーが画像から出す通り道の空き（clear_cm）がこれより近ければ、進むのをやめて向きを変える。
     # 止まるまでの距離（未測定）+ 余裕 15 cm
     explore_clear_stop_cm: float = 25.0  # snoo がこれより近くに見えたら止まって見守る
@@ -164,7 +169,8 @@ class CarConfig:
     steer_max: float = 30.0
     # 車体の動きの換算（自転車モデル）。速さ 1 あたりの cm/s と、前後の車輪の間（cm）。
     # 速さの換算は見積もりで、測っていない（snoo_trucar#8）。車輪の半径は 3.26 cm、左右の車輪の間は 12 cm
-    cm_s_per_speed: float = 1.0
+    # 2026-10-29: 速さ 12 で 1.48 s 走って 28〜30 cm（home-linux の VGGT の位置、カメラの高さ 8.0 cm で縮尺）→ 約 1.7
+    cm_s_per_speed: float = 1.7
     wheelbase_cm: float = 14.0  # PiCar-X の URDF（cau-se/ARCHES-PiCar-X）。最小回転半径は ±30° で 24 cm
 
 

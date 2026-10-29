@@ -24,7 +24,7 @@ from .controller import SEARCH, TRACK, Controller, ego_yaw_rate
 from .estimator import Detection, TargetEstimator
 
 MS = 1_000_000  # ns
-SPEED_CM_S = 1.0  # picarx の速さ 1 あたり（cm/s。sim.py と同じ仮の値。#8 で測る）
+SPEED_CM_S = 1.7  # picarx の速さ 1 あたり（cm/s。2026-10-29 に VGGT の位置から。#8 で測る）
 WHEELBASE_CM = 14.0  # 前後の車軸の間（PiCar-X の URDF、cau-se/ARCHES-PiCar-X）
 
 

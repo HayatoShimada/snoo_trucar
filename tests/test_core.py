@@ -597,25 +597,25 @@ def test_explore_asks_the_server_for_the_next_step():
     x = run(scan_s + 0.05)
     assert c.station_wait == 0 and x.speed == 0  # 撮り終えて、サーバーの返事を待つ
     assert run(5.0).speed == 0
-    c.plan = (0, PLAN_MOVE, 10.0, 12.0, 20.0)  # 右に 10° で 20 cm
+    c.plan = (0, PLAN_MOVE, 12.0, 1, 10.0, 20.0, 0, 0, 0, 0)  # 右に 10° で 20 cm
     x = run(0.1)
     assert x.steer == 10.0 and x.speed == 12.0 and c.station_wait == -1
     run(20.0 / (12.0 * c.car.cm_s_per_speed))
     assert c._ex_phase == "scan" and STOP_REASONS[c.last_step[1]] == "done"
-    assert abs(c.last_step[0] - 20.0 / 12.0) < 0.1
+    assert abs(c.last_step[0] - 20.0 / (12.0 * c.car.cm_s_per_speed)) < 0.1
     # 次の station。超音波で前が近いと途中で止めて、理由を残す
     run(scan_s + 0.05)
     assert c.station_wait == 1
-    c.plan = (1, PLAN_MOVE, 0.0, 12.0, 40.0)
+    c.plan = (1, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
     run(0.5)
-    run(0.05, us=30.0)
+    run(0.05, us=ctl.explore_step_stop_cm - 5)
     assert STOP_REASONS[c.last_step[1]] == "ultrasonic"
     # サーバーに届かない → Pi だけで決める。終わり → 待機
     run(scan_s + 0.05)
-    c.plan = (2, PLAN_FALLBACK, 0.0, 0.0, 0.0)
+    c.plan = (2, PLAN_FALLBACK) + (0.0,) * 8
     assert run(0.1).speed > 0 and c._ex_phase == "drive"
     c2, _ = _controller("explore")
-    c2.station_wait, c2._ex_phase, c2.plan = 0, "plan", (0, PLAN_DONE, 0, 0, 0)
+    c2.station_wait, c2._ex_phase, c2.plan = 0, "plan", (0, PLAN_DONE) + (0.0,) * 8
     c2.step(est, S, dt, 200.0)
     assert c2.mode == "idle"
 
@@ -663,10 +663,40 @@ def test_station_client_posts_and_writes_the_plan(tmp_path):
         c._session = "explore_x"
         c._post(0, runner.last_cmd, rec)
         assert b'"station_id": 0' in got["body"] and b"jpg0" in got["body"] and b"jpg1" not in got["body"]
-        assert tuple(plan.read()[1]) == (0, PLAN_MOVE, -8, 12, 30)
+        assert tuple(plan.read()[1]) == (0, PLAN_MOVE, 12, 1, -8, 30, 0, 0, 0, 0)
         cfg.server.map_url = "http://127.0.0.1:1/nothing"  # 届かない → Pi だけで決める
         c._post(1, runner.last_cmd, rec)
         assert plan.read()[1][:2].tolist() == [1, PLAN_FALLBACK]
     finally:
         srv.shutdown()
         plan.close()
+
+
+def test_explore_server_segments_and_reverse():
+    from snoo_trucar.controller import PLAN_MOVE, STOP_REASONS
+
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    dt = 0.01
+    v = 12.0 * c.car.cm_s_per_speed
+
+    def go(plan, seconds, us=200.0):
+        c._ex_phase, c.station_wait, c.plan, c._ex_t = "plan", 0, plan, 0.0
+        out = []
+        for k in range(int(seconds / dt)):
+            x = c.step(est, S + int(k * dt * S), dt, us)
+            out.append((x.steer, x.speed, x.pan))
+        return out
+
+    # 曲がってからまっすぐ: 右 25° で 15 cm → まっすぐ 25 cm。曲がる間は首も右へ
+    out = go((0, PLAN_MOVE, 12.0, 2, 25.0, 15.0, 0.0, 25.0, 0, 0), 40 / v + 0.3)
+    turn = [o for o in out if o[1] > 0 and o[0] == 25.0]
+    straight = [o for o in out if o[1] > 0 and o[0] == 0.0]
+    assert abs(len(turn) * dt - 15 / v) < 0.05 and abs(len(straight) * dt - 25 / v) < 0.05
+    assert turn[-1][2] > 25.0  # 首は曲がる方へ（ハンドルの 1.5 倍、30° まで）
+    assert STOP_REASONS[c.last_step[1]] == "done"
+    # 下がる: 前が近くても止めない（前の超音波は見ない）。距離は 30 cm まで
+    out = go((0, PLAN_MOVE, -12.0, 1, 20.0, 80.0, 0, 0, 0, 0), 80 / v, us=10.0)
+    back = [o for o in out if o[1] < 0]
+    assert all(o[0] == 20.0 for o in back)
+    assert abs(len(back) * dt - ctl.explore_reverse_max_cm / v) < 0.05
