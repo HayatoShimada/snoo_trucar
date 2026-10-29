@@ -17,16 +17,17 @@ from .controller import MODES, Controller, ego_yaw_rate
 from .estimator import Detection, TargetEstimator
 from .shm import SeqBuffer
 
-# meas: t_capture_ns, cx, cy, w, h, score
-MEAS_N = 6
+# meas: t_capture_ns, cx, cy, w, h, score, stress（判定なしは -1）
+MEAS_N = 7
 # us: t_ns, cm（測れないとき -1）
 US_N = 2
 # mode: controller.MODES の番号
 MODE_N = 1
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
 #      loop_hz, jitter_p99_us, overruns, scan_index, mode,
-#      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）
-CMD_N = 17
+#      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
+#      guard（guard.OK / BACKOFF / HOLD / REST）
+CMD_N = 18
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
 
@@ -84,6 +85,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 v = r[1]
                 est.measure(Detection(int(v[0]), v[1], v[2], v[3], v[4], v[5]), now, us_cm)
                 used_capture, used_ns = int(v[0]), time.monotonic_ns()
+                controller.observe_stress(None if v[6] < 0 else v[6])
 
             cmd = controller.step(est, now, dt, us_cm)
             if ctl.ego_ff:
@@ -94,7 +96,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             out_vals[:] = (
                 now, cmd.steer, cmd.speed, cmd.pan, cmd.tilt, cmd.state, float(est.valid),
                 est.bearing.x[0], est.dist.x[0], min(since, 1e6), loop_hz, p99, overruns,
-                cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns,
+                cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns, cmd.guard,
             )  # fmt: skip
             out.write(out_vals)
 

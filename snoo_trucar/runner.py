@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .config import Config
 from .controller import MODES, STATE_NAMES
+from .guard import GUARD_NAMES, OK
 from .shm import SeqBuffer
 from .trace import Trace
 
@@ -227,6 +228,8 @@ class Runner:
             s += f" | 方位={v[7]:+6.1f}° 距離={v[8]:5.0f}cm 見えてから={v[9]:4.2f}s"
         if v[13] >= 0:
             s += f" | 撮影 {int(v[13])}"
+        if int(v[17]) != OK:
+            s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"
         s += f" | {self.battery[0]}"
         if self.link is not None:

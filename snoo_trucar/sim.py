@@ -70,7 +70,7 @@ class SimWorld:
             fy = 0.5 / math.tan(math.radians(cam.vfov_deg) / 2)
             elev = -math.degrees(math.atan(5.0 / dist))  # snoo の中心はカメラより 5 cm 低い
             vv = 0.5 + fy * math.tan(math.radians(car.tilt - elev))
-            box = (u, vv, h * 0.8, h * (1 + self.rng.gauss(0, 0.03)), 0.9)
+            box = (u, vv, h * 0.8, h * (1 + self.rng.gauss(0, 0.03)), 0.9, -1.0)
             self.visible_frames += 1
             self._queue.append((self.t + self.latency_s, (time.monotonic_ns(), *box)))
 

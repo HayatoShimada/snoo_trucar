@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .config import CarConfig, ControlConfig
 from .estimator import TargetEstimator
+from .guard import OK, Guard
 
 SEARCH, TRACK, COAST, IDLE, MAP = 0, 1, 2, 3, 4
 STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", MAP: "MAP"}
@@ -35,6 +36,7 @@ class Command:
     tilt: float = 0.0
     state: int = SEARCH
     scan_index: int = -1  # MAP のとき、今どの向きか
+    guard: int = OK  # 安全の層の状態（guard.py）
 
 
 def clip(x: float, lo: float, hi: float) -> float:
@@ -61,6 +63,10 @@ class Controller:
         self._search_t = 0.0
         self._search_turns = 0
         self._arc_left = 0.0
+        self.guard = Guard(ctl.guard, car.cm_s_per_speed)
+
+    def observe_stress(self, stress: float | None) -> None:
+        self.guard.observe_stress(stress)
 
     def set_mode(self, mode: str) -> None:
         if mode not in MODES:
@@ -108,6 +114,14 @@ class Controller:
             tilt_goal = est.elev.x[0] + est.elev.x[1] * ctl.lead_s
             if state == TRACK and self.mode in ("keep", "follow"):
                 steer, speed = self._approach(bearing, est.dist.x[0], ultrasonic_cm)
+
+        # 走る行動の出力は、最後に必ず安全の層を通す
+        seen = est.valid and state == TRACK
+        steer, speed = self.guard.apply(
+            self.mode in ("keep", "follow"), dt, steer, speed,
+            est.dist.x[0] if seen else None, est.dist.x[1] if seen else None,
+        )
+        cmd.guard = self.guard.state
 
         # カメラは目標に一次遅れで寄せ、速さも抑える
         max_step = self.PAN_RATE * dt

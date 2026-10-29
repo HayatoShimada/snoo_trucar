@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .guard import GuardConfig
+
 DEFAULT_PATH = Path.home() / ".config" / "snoo_trucar" / "config.toml"
 
 
@@ -112,6 +114,8 @@ class ControlConfig:
     search_pan_deg: float = 35.0
     search_period_s: float = 6.0
     search_tilt_deg: float = 0.0
+    # snoo を怖がらせない決まり（guard.py）。設定ファイルでは [control.guard]
+    guard: GuardConfig = field(default_factory=GuardConfig)
 
 
 @dataclass

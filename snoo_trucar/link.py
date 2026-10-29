@@ -197,7 +197,8 @@ class Link:
             if box is not None:
                 self.stats.snoo_hits += 1
                 if self.confirm.hit(reply.t_capture_ns):
-                    self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score))
+                    stress = -1.0 if box.stress is None else box.stress
+                    self.meas.write((reply.t_capture_ns, box.cx, box.cy, box.w, box.h, score, stress))
                     if self.trace is not None:
                         self.trace.mark(reply.t_capture_ns, "meas")
                     if self.confirm.started and jpeg is not None:

@@ -359,3 +359,74 @@ def test_battery_state():
     label, ok = battery_state(0.0, 6.6)
     assert not ok and "入っていない" in label
     assert battery_state(None, 6.6)[1] is True  # 測れないときは止めない
+
+
+def test_guard_stress_backs_off_then_waits_for_calm():
+    from snoo_trucar.guard import BACKOFF, HOLD, OK, REST, Guard, GuardConfig
+
+    g = Guard(GuardConfig(), 1.0)
+    dt = 0.01
+    assert g.apply(True, dt, 5.0, 20.0, 100.0, 0.0) == (5.0, 20.0)
+    for s in (0.6, 0.6):
+        g.observe_stress(s)
+    assert g.state == OK  # 0.5 以上でも 2 回では引かない
+    g.observe_stress(0.6)
+    assert g.state == BACKOFF
+    moved = 0.0
+    while g.state == BACKOFF:
+        steer, speed = g.apply(True, dt, 5.0, 20.0, 100.0, 0.0)
+        assert speed < 0 and steer == 0
+        moved -= speed * dt
+    assert g.state == HOLD and 20 <= moved <= 30
+    g.observe_stress(0.1)
+    for _ in range(int(4.9 / dt)):
+        assert g.apply(True, dt, 0.0, 20.0, 100.0, 0.0)[1] == 0
+    g.observe_stress(0.3)  # まだ落ち着いていない → 待ち直す
+    for _ in range(int(3 / dt)):
+        g.apply(True, dt, 0.0, 20.0, 100.0, 0.0)
+    assert g.state == HOLD
+    g.observe_stress(0.1)
+    for _ in range(int(5.1 / dt)):
+        g.apply(True, dt, 0.0, 20.0, 100.0, 0.0)
+    assert g.state == OK
+    # 1 回の遊びで 3 回引いたら休む
+    g.observe_stress(0.9)
+    g.state = OK
+    g.observe_stress(0.9)
+    assert g.state == REST and g.apply(True, dt, 5.0, 20.0, 100.0, 0.0) == (0.0, 0.0)
+
+
+def test_guard_rules_without_play_state():
+    from snoo_trucar.guard import BACKOFF, REST, Guard, GuardConfig
+
+    c = GuardConfig()
+    g = Guard(c, 1.0)
+    dt = 0.01
+    # 1. 自分が動いて 30 cm より近づかない。下がるのはよい
+    assert g.apply(True, dt, 0.0, 20.0, 35.0, 0.0)[1] == 0
+    assert g.apply(True, dt, 0.0, -20.0, 35.0, 0.0)[1] == -20.0
+    # 2. 近づいた直後に 50 cm/s で離れたらストレス
+    g.apply(True, dt, 0.0, 20.0, 100.0, 0.0)
+    for _ in range(int(c.flee_hold_s / dt) + 1):
+        g.apply(True, dt, 0.0, 0.0, 100.0, 60.0)
+    assert g.state == BACKOFF and g.triggers == 1
+    # 近づいていなければ、離れていっても引かない
+    g = Guard(c, 1.0)
+    for _ in range(int(2 / dt)):
+        g.apply(True, dt, 0.0, 0.0, 100.0, 60.0)
+    assert g.triggers == 0
+    # 3. 3 分で休む。休む間は走らない
+    for _ in range(int(c.session_s / 0.1) + 1):
+        g.apply(True, 0.1, 0.0, 10.0, 200.0, 0.0)
+    assert g.state == REST
+    assert g.apply(True, 0.1, 0.0, 10.0, 200.0, 0.0) == (0.0, 0.0)
+
+
+def test_play_stress_in_reply():
+    from snoo_trucar.protocol import make_reply
+
+    det = {"box": [0.1, 0.1, 0.3, 0.4], "cat": 0.9, "snoo": 0.9,
+           "play": {"state": "stalk", "p": {"stress": 0.7}}}
+    assert parse_reply(make_reply(1, 2, 3.0, [det])).boxes[0].stress == 0.7
+    det["play"] = None
+    assert parse_reply(make_reply(1, 2, 3.0, [det])).boxes[0].stress is None

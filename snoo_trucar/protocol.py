@@ -33,6 +33,7 @@ class Box:
     h: float
     cat: float  # 猫らしさ
     snoo: float | None  # snoo らしさ（サーバーが判定しないときは None）
+    stress: float | None = None  # 遊びの様子 play.p.stress（判定しないときは None）
 
 
 @dataclass
@@ -49,6 +50,8 @@ def parse_reply(data: bytes) -> Reply:
         raise ValueError(f"知らない版: {msg.get('v')}")
     boxes = []
     for d in msg.get("dets", []):
+        play = d.get("play") or msg.get("play") or {}
+        stress = (play.get("p") or {}).get("stress")
         x1, y1, x2, y2 = d["box"]
         boxes.append(
             Box(
@@ -58,6 +61,7 @@ def parse_reply(data: bytes) -> Reply:
                 h=y2 - y1,
                 cat=float(d.get("cat", 0.0)),
                 snoo=None if d.get("snoo") is None else float(d["snoo"]),
+                stress=None if stress is None else float(stress),
             )
         )
     return Reply(int(msg["seq"]), int(msg["t_capture_ns"]), float(msg.get("infer_ms", 0)), boxes)
