@@ -23,7 +23,9 @@ class StationClient:
         self.cfg = runner.cfg
         self._posted = -1
         self._session = None
-        self._last_move = None  # 直前に返ってきた 1 歩 ([(steer, cm)], speed)
+        # 返ってきた 1 歩を station ごとに ([(steer, cm)], speed)。どれを走ったかは制御プロセスが
+        # step_station で伝える（25 s 待って Pi だけで決めた後に遅れて来た返事を、走ったことにしない）
+        self._moves: dict[int, tuple[list[tuple[float, float]], float]] = {}
         self.last = ""  # 状態の行に出す
 
     def run(self, stop: threading.Event) -> None:
@@ -40,7 +42,7 @@ class StationClient:
         rec = self.runner.recorder
         if v is not None and rec is not None and rec.dir is not None:
             if self._session != rec.dir.name:
-                self._session, self._posted, self._last_move = rec.dir.name, -1, None
+                self._session, self._posted, self._moves = rec.dir.name, -1, {}
             k = int(v[18])
             if k >= 0 and k != self._posted:
                 self._posted = k
@@ -51,15 +53,22 @@ class StationClient:
         prev = None
         if k > 0:
             secs, reason = float(v[19]), STOP_REASONS[int(v[20])]
-            if self._last_move is not None:
-                segs, speed = self._last_move
-                # steer_deg は最後に走った区切りのハンドル（途中で止めたときは、そこまで）
-                prev = {"steer_deg": segs[-1][0], "speed": abs(speed), "reverse": speed < 0,
-                        "segments": [{"steer_deg": s, "distance_cm": d} for s, d in segs],
+            move = self._moves.get(int(v[23])) if len(v) > 28 and int(v[23]) >= 0 else None
+            if move is not None:
+                segs = move[0]
+                speed = float(v[24])  # 上限（explore_speed）で抑えた後の、実際に使った速さ
+                # 区切りは実際に走った所まで（途中で止めたら、その区切りは止まった所まで）。
+                # 距離は guard・電池を通した後の速さで数えたもの（速さ × 秒では、待った間も進んだことになる）
+                driven = [float(x) for x in v[26:29]]
+                done = [(s, round(d, 1)) for (s, _), d in zip(segs, driven, strict=False) if d > 0.05]
+                done = done or [(segs[0][0], 0.0)]
+                # steer_deg は最後に走った区切りのハンドル
+                prev = {"steer_deg": done[-1][0], "speed": abs(speed), "reverse": speed < 0,
+                        "segments": [{"steer_deg": s, "distance_cm": d} for s, d in done],
                         "seconds": round(secs, 2),
-                        "est_distance_cm": round(abs(speed) * self.cfg.car.cm_s_per_speed * secs, 1),
+                        "est_distance_cm": round(float(v[25]), 1),
                         "stop_reason": reason,
-                        "low_obstacle_passed": int(v[22]) if len(v) > 22 else 0}  # fmt: skip
+                        "low_obstacle_passed": int(v[22])}  # fmt: skip
             else:
                 prev = {"stop_reason": "local"}  # 前の 1 歩は Pi だけで決めた
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
@@ -88,7 +97,7 @@ class StationClient:
                 segs = [(float(s["steer_deg"]), float(s["distance_cm"])) for s in segs[:MAX_SEGMENTS]]
                 flat = [x for s in segs for x in s] + [0.0] * (2 * (MAX_SEGMENTS - len(segs)))
                 plan = (k, PLAN_MOVE, speed, len(segs), *flat)
-                self._last_move = (segs, speed)
+                self._moves[k] = (segs, speed)
                 desc = " → ".join(f"ハンドル{s:+.0f}° {d:.0f}cm" for s, d in segs)
                 self.last = (f"station {k}: 次は{'（下がる）' if speed < 0 else ''} {desc} "
                              f"位置={ans.get('pose')} 目標={ans.get('target')}")  # fmt: skip
@@ -98,7 +107,6 @@ class StationClient:
             else:
                 raise RuntimeError(f"知らない返事: {ans}")
         except Exception as e:  # 届かない・失敗 → Pi だけで決める
-            self._last_move = None
             self.last = f"station {k}: 地図のサーバーに届かない（{type(e).__name__}: {str(e)[:80]}）→ Pi だけで決める"
         if rec.dir is None or rec.dir.name != self._session:
             # 返事を待つ間に explore をやめた・始め直した。前の explore の 1 歩は渡さない

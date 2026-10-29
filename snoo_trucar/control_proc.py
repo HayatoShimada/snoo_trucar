@@ -19,8 +19,9 @@ from .shm import SeqBuffer
 
 # meas: t_capture_ns, cx, cy, w, h, score, stress（判定なしは -1）
 MEAS_N = 7
-# us: t_ns, cm（測れないとき -1）, stuck（走らせているのに画像が動かない。motion.py）
-US_N = 3
+# us: t_ns, cm（測れないとき -1）, stuck（走らせているのに画像が動かない。motion.py）,
+#     drive_ok（電池が足りていて、メインプロセスが速さを書いている。進んだ距離を数えるため）
+US_N = 4
 # mode: controller.MODES の番号
 MODE_N = 1
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
@@ -28,8 +29,10 @@ MODE_N = 1
 #      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
 #      guard（guard.OK / BACKOFF / HOLD / REST）,
 #      station_wait（サーバーの返事を待っている station、-1 で待っていない）, last_step_s, last_step_reason,
-#      ex_station（explore で今の station。走っている間は次の station）, low_passed（直前の 1 歩で低い物を越えた回数）
-CMD_N = 23
+#      ex_station（explore で今の station。走っている間は次の station）, low_passed（直前の 1 歩で低い物を越えた回数）,
+#      step_station（直前の 1 歩はどの station の返事か。-1 は Pi だけで決めた）, step_speed（使った速さ、負なら下がる）,
+#      step_driven_cm（実際に書いた速さで数えた距離）, 区切りごとの距離 × controller.MAX_SEGMENTS
+CMD_N = 29
 # clear: t_capture_ns, cm, state（controller.CLEAR_*。0: 返事に欄が無い / 1: 値がある / 2: null /
 #        3: clear_skip。protocol.Reply）
 CLEAR_N = 3
@@ -92,6 +95,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 us_t, cm = int(r[1][0]), r[1][1]
                 us_cm = cm if cm > 0 else None
                 controller.stuck = bool(r[1][2])
+                controller.drive_ok = bool(r[1][3])
             controller.us_stale = us_is_stale(now, us_t)
             if us_cm is not None and controller.us_stale:
                 us_cm = None
@@ -134,6 +138,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 est.bearing.x[0], est.dist.x[0], min(since, 1e6), loop_hz, p99, overruns,
                 cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns, cmd.guard,
                 controller.station_wait, *controller.last_step, controller._ex_stop, controller.low_passed,
+                controller.step_station, controller._ex_step[0], sum(controller.step_driven),
+                *controller.step_driven,
             )  # fmt: skip
             out.write(out_vals)
 

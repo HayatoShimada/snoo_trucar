@@ -145,6 +145,14 @@ class Controller:
         self._ex_turns = 0
         self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）
         self.us_stale = False  # 超音波の新しい値（-1 を含む）が来ていない。control_proc が入れる
+        # メインプロセスが速さを書いてよいか（電池が少ない・入っていないと 0 で書く）。control_proc が入れる
+        self.drive_ok = True
+        # 進んだ距離は、guard と電池を通した後の速さで数える（step の最後）。_explore が走らせた回だけ
+        self._drive_count: str | None = None  # "step" / "drive"
+        self._skip_now = False
+        # 直前のサーバーの 1 歩: どの station の返事か（-1 は Pi だけで決めた）、区切りごとに走った距離（cm）
+        self.step_station = -1
+        self.step_driven = [0.0] * MAX_SEGMENTS
         # サーバーが画像から出す通り道の空き（protocol.Reply.clear_cm）
         self.clear_state, self.clear_cm = CLEAR_ABSENT, -1.0
         self._clear_null_since: int | None = None  # null・古いが始まった時刻
@@ -227,6 +235,7 @@ class Controller:
         self._ex_seg = 0
         self._ex_sched, self._ex_sched_stop = [], -1
         self._low_left, self.low_passed, self._low_clear_cm = 0.0, 0, 0.0
+        self.step_station, self.step_driven = -1, [0.0] * MAX_SEGMENTS
 
     def set_plan(self, plan) -> None:
         """サーバーの 1 歩（control_proc が plan の共有メモリから入れる）。返事を待っている station の分
@@ -239,6 +248,7 @@ class Controller:
         self._now_ns = now_ns
         since = est.since_seen_s(now_ns)
         cmd.scan_index = -1
+        self._drive_count = None
         if self.mode == "idle":
             state = IDLE
         elif self.mode == "map":
@@ -312,7 +322,27 @@ class Controller:
         if ultrasonic_cm is not None and ultrasonic_cm < ctl.stop_distance_cm:
             cmd.speed = min(cmd.speed, 0.0)
         cmd.state = state
+        if self._drive_count is not None:
+            self._count_driven(cmd.speed, dt)
         return cmd
+
+    def _count_driven(self, speed: float, dt: float) -> None:
+        """explore で進んだ距離を、実際に書く速さで数える。guard が待たせた（HOLD・REST）・電池が少ない
+        ときは 0 なので進まず、1 歩を終えたことにならない。逆向き（guard の BACKOFF）は数えない"""
+        if not self.drive_ok:
+            speed = 0.0
+        if self._drive_count == "step":
+            sign = 1.0 if self._ex_step[0] > 0 else -1.0
+            d = max(0.0, speed * sign) * self.car.cm_s_per_speed * dt
+            if self._ex_seg < MAX_SEGMENTS:
+                self.step_driven[self._ex_seg] += d
+            if self._low_left > 0:
+                self._low_left -= d
+            if self._skip_now:
+                self._skip_moved += d
+        else:
+            d = max(0.0, speed) * self.car.cm_s_per_speed * dt
+        self._ex_moved += d
 
     def _approach(self, bearing: float, dist: float, ultrasonic_cm: float | None):
         """距離のループ（速さ）と、車体の向きのループ（ハンドル）。
@@ -433,6 +463,7 @@ class Controller:
                     self._ex_phase, self._ex_t, self._ex_moved, self._ex_seg = "step", 0.0, 0.0, 0
                     self._low_left, self.low_passed = 0.0, 0
                     self._step_start_ns, self._skip_moved = self._now_ns, 0.0
+                    self.step_station, self.step_driven = int(p[0]), [0.0] * MAX_SEGMENTS
                 elif not self._ex_local_next(us_cm):  # サーバーに届かない → Pi だけの探索
                     return 0.0, 0.0, 0.0, 0.0
             elif self._ex_t >= EXPLORE_PLAN_TIMEOUT_S:
@@ -487,12 +518,9 @@ class Controller:
                 return 0.0, 0.0, 0.0, 0.0
             if self._low_left > 0:
                 speed = min(speed, LOW_OBSTACLE_SPEED)
-                self._low_left -= speed * car.cm_s_per_speed * dt
             if skip_capped:
                 speed = min(speed, CLEAR_SKIP_SPEED)
-            if skip:
-                self._skip_moved += speed * car.cm_s_per_speed * dt
-            self._ex_moved += abs(speed) * car.cm_s_per_speed * dt
+            self._drive_count, self._skip_now = "step", skip  # 進んだ距離は step の最後に数える
             return (_drive_pan(steer) if fwd else 0.0), DRIVE_TILT, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
             # ぶつかった・詰まった。進んでいたなら下がって向きを変え、下がっていたなら止まって測り直す
@@ -512,12 +540,12 @@ class Controller:
             if us_cm is None or us_cm < ctl.explore_clear_cm:
                 self._ex_phase, self._ex_t, self._ex_turns = "back", 0.0, 0
             else:
-                self._ex_moved += ctl.explore_speed * car.cm_s_per_speed * dt
                 if self._ex_moved >= ctl.explore_step_cm:
                     # 新しい場所に着いた。次に向きを変えるときは逆回りにして、片寄らないようにする
                     self._ex_turn_dir = -self._ex_turn_dir
                     self._ex_phase, self._ex_t = "scan", 0.0
                     return 0.0, 0.0, 0.0, 0.0
+                self._drive_count = "drive"
                 return 0.0, DRIVE_TILT, 0.0, ctl.explore_speed
         # 前が塞がっている。切り返しで同じ向きに回り続ける（ハンドルを切って下がる → 逆に切って進む）。
         # 下がるのは後ろが見えないので短く。進む間は超音波が近ければやめる
@@ -551,6 +579,7 @@ class Controller:
         """Pi だけで次を決める（サーバーを使わない・届かないとき）。動くなら True"""
         ctl = self.ctl
         self._ex_t, self._ex_moved = 0.0, 0.0
+        self.step_station = -1  # 次の station には、サーバーの 1 歩でなく Pi だけで決めたと伝える
         if us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm:
             self._ex_phase = "drive"
         elif us_cm is not None:

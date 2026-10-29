@@ -574,3 +574,96 @@ def test_low_obstacle_pass_stops_when_clear_shrinks():
     c.set_clear(CLEAR_VALUE, 8.0, k.t, k.t)
     x = k.run(DT, us=70.0)
     assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear"
+
+
+def test_server_step_counts_only_the_distance_actually_driven():
+    """電池が少ない・guard が待たせている間は進んだことにしない（偽の done・偽の prev_step を送らない）"""
+    from snoo_trucar.guard import HOLD
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(0, -1.0, k.t)
+    v = 12.0 * c.car.cm_s_per_speed
+    _server_step(c, k, cm=20.0, speed=12.0)
+    c.drive_ok = False  # メインプロセスが、電池が少ないので速さ 0 で書いている
+    k.run(20.0 / v + 0.5)
+    assert c._ex_phase == "step" and c.step_driven[0] < 0.5
+    c.drive_ok = True
+    k.run(20.0 / v + 0.1)
+    assert STOP_REASONS[c.last_step[1]] == "done" and abs(c.step_driven[0] - 20.0) < 0.5
+    # guard が待たせている（HOLD）間も進まない
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    c2.set_clear(0, -1.0, k2.t)
+    _server_step(c2, k2, cm=20.0, speed=12.0)
+    c2.guard.state = HOLD
+    c2.guard._calm_since = None
+    c2.guard._stress = 0.9  # 落ち着かない
+    k2.run(20.0 / v + 0.5)
+    assert c2._ex_phase == "step" and sum(c2.step_driven) < 0.5
+
+
+def test_server_step_reports_the_segments_actually_driven():
+    """途中で止まったら、走った区切りまで（最後は止まった所まで）を返す"""
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(0, -1.0, k.t)
+    v = 15.0 * c.car.cm_s_per_speed
+    c._ex_phase, c.station_wait = "plan", 3
+    c.set_plan((3, PLAN_MOVE, 40.0, 2, 20.0, 15.0, 0.0, 40.0, 0, 0))  # 速さ 40 は 15 に抑える
+    k.run(DT)
+    assert c.step_station == 3 and c._ex_step[0] == ctl.explore_speed
+    k.run((15.0 + 10.0) / v)
+    k.run(DT, us=ctl.explore_step_stop_cm - 5)  # 2 つ目の区切りの途中で止まる
+    assert STOP_REASONS[c.last_step[1]] == "ultrasonic"
+    assert abs(c.step_driven[0] - 15.0) < 0.5 and abs(c.step_driven[1] - 10.0) < 1.0 and c.step_driven[2] == 0
+
+
+def test_station_prev_step_from_what_was_driven(monkeypatch, tmp_path):
+    """prev_step は制御プロセスが数えた距離・使った速さ・走った区切り。25 s 待って Pi だけで決めた後に
+    遅れて来た返事は、次の prev_step に使わない"""
+    import json
+    from types import SimpleNamespace
+
+    import requests
+
+    from snoo_trucar.config import Config
+    from snoo_trucar.control_proc import CMD_N, PLAN_N
+    from snoo_trucar.shm import SeqBuffer
+    from snoo_trucar.station import StationClient
+
+    sent = []
+
+    def post(url, data, files, timeout):
+        sent.append(json.loads(data["meta"]))
+        body = {"action": "move", "speed": 40, "segments": [{"steer_deg": 20, "distance_cm": 15},
+                                                             {"steer_deg": 0, "distance_cm": 40}]}  # fmt: skip
+        return SimpleNamespace(status_code=200, text="", json=lambda: body)
+
+    monkeypatch.setattr(requests, "post", post)
+    cfg = Config()
+    d = tmp_path / "explore_a"
+    d.mkdir()
+    rec = SimpleNamespace(dir=d, entries=[])
+    plan = SeqBuffer(PLAN_N)
+    v = [0.0] * CMD_N
+    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=v)
+    c = StationClient(runner, plan)
+    c._session = "explore_a"
+    try:
+        c._post(0, v, rec)
+        # station 0 の 1 歩: 速さ 15 で、1 つ目 15 cm、2 つ目 10 cm で止まった
+        v[19], v[20], v[22] = 1.2, STOP_REASONS.index("ultrasonic"), 0
+        v[23], v[24], v[25], v[26], v[27], v[28] = 0, 15.0, 25.0, 15.0, 10.0, 0.0
+        c._post(1, v, rec)
+        prev = sent[-1]["prev_step"]
+        assert prev["est_distance_cm"] == 25.0 and prev["speed"] == 15.0 and not prev["reverse"]
+        assert prev["segments"] == [{"steer_deg": 20.0, "distance_cm": 15.0},
+                                    {"steer_deg": 0.0, "distance_cm": 10.0}]  # fmt: skip
+        assert prev["steer_deg"] == 0.0 and prev["stop_reason"] == "ultrasonic"
+        # station 1 の返事は遅れ、制御プロセスは Pi だけで決めた（step_station = -1）
+        v[23] = -1
+        c._post(2, v, rec)
+        assert sent[-1]["prev_step"] == {"stop_reason": "local"}
+    finally:
+        plan.close()

@@ -240,7 +240,8 @@ class Runner:
                 self.trace.loop("超音波1回", (time.monotonic() - t0) * 1000)
             self.last_us = cm
             stuck = self.motion is not None and self.motion.stuck
-            us.write((time.monotonic_ns(), cm if cm is not None else -1.0, float(stuck)))
+            drive_ok = float(self.battery[1])
+            us.write((time.monotonic_ns(), cm if cm is not None else -1.0, float(stuck), drive_ok))
             fails = 0 if cm is not None else fails + 1
             # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける。
             # explore では -1 が「前が遠くまで空いている」の意味にもなるので、あけすぎない
