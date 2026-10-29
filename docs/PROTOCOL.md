@@ -82,3 +82,18 @@ Google フォトの共有アルバム（snoo の写真 300 枚）を home-linux 
 
 Pi 側の偽サーバー: `python -m snoo_trucar fake-server`（画像を受けて、決まった位置に snoo がいると返す）。
 Pi から 1 枚送って返事を見る: `python -m snoo_trucar probe --image cat.jpg`。
+
+## 探索の地図（station、HTTP）
+
+explore で止まって撮るたびに（station）、`POST http://192.168.0.248:8720/v1/snoo/map/station`（multipart/form-data）で送り、
+次の 1 歩をもらう（`snoo_trucar/station.py`。サーバーは home-linux の rocm_opencv_server）。
+
+- `meta`: scan.json の形の JSON。`frames[]` はこの station の画像（前の station から走ってくる間の分も）。
+  加えて `session_id`（explore_日時）、`station_id`（0, 1, …）、`prev_step`（`{steer_deg, speed, seconds, est_distance_cm, stop_reason}`、
+  最初は null、Pi だけで決めた後は `{"stop_reason": "local"}`）、`battery_v`、`ultrasonic_cm`
+- `images`: 1 枚ずつ。ファイル名は `frames[].file`
+- 返事: `{"action": "move", "steer_deg", "speed", "distance_cm", "pose": {x, y, yaw_deg}}` か `{"action": "done", "reason"}`。
+  Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、超音波・clear_cm・画像が動かないときは途中で止める
+  （`stop_reason`: done / ultrasonic / clear / clear_unknown / stuck）
+- 20 s で返事が無い・失敗したら、Pi だけで次を決める（超音波で前が空いていれば進み、塞がっていれば切り返す）
+- 地図は `GET http://192.168.0.248:8720/v1/snoo/map/<session_id>/topdown.png`

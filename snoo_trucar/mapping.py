@@ -66,8 +66,11 @@ class MapRecorder:
         entry = {"file": name, "t_capture_ns": t_ns, "pan_deg": pan, "tilt_deg": tilt,
                  "ultrasonic_cm": ultrasonic_cm}  # fmt: skip
         if self.mode == "explore":
-            # 自分の動きの手がかり（指令。車輪の回転計は無い）
+            # 自分の動きの手がかり（指令。車輪の回転計は無い）。station は撮った場所の番号
+            # （走っている間の分は、着いた先の station に入れる。control_proc の ex_station）
             entry.update(steer_deg=float(cmd[1]), speed=float(cmd[2]), moving=moving)
+            if len(cmd) > 21:
+                entry["station"] = int(cmd[21])
         self.entries.append(entry)
         # 途中で止まっても（サービスの入れ替え・電池切れ）残るよう、1 枚ごとに足していく
         with open(self.dir / "frames.jsonl", "a") as f:

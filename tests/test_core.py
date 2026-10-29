@@ -439,6 +439,7 @@ def test_explore_scans_drives_and_turns():
 
     est = TargetEstimator(53.5, 41.4, 33.0)
     c, ctl = _controller("explore")
+    ctl.explore_server = False  # Pi だけで決める探索
     dt = 0.01
     t = [0.0]
 
@@ -575,3 +576,97 @@ def test_explore_uses_image_clearance():
     c.set_clear(2, -1.0, S)  # null が 0.3 s 続いたら止まって撮り直す
     assert c.step(est, S + int(0.1 * S), 0.01, 200.0).speed > 0
     assert c.step(est, S + int(0.35 * S), 0.01, 200.0).speed == 0 and c._ex_phase == "scan"
+
+
+def test_explore_asks_the_server_for_the_next_step():
+    from snoo_trucar.controller import EXPLORE_PANS, EXPLORE_TILTS, PLAN_DONE, PLAN_FALLBACK, PLAN_MOVE, STOP_REASONS
+
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    dt = 0.01
+    t = [0.0]
+
+    def run(seconds, us=200.0):
+        x = None
+        for _ in range(int(seconds / dt)):
+            t[0] += dt
+            x = c.step(est, S + int(t[0] * S), dt, us)
+        return x
+
+    scan_s = len(EXPLORE_PANS) * len(EXPLORE_TILTS) * MAP_HOLD_S
+    x = run(scan_s + 0.05)
+    assert c.station_wait == 0 and x.speed == 0  # 撮り終えて、サーバーの返事を待つ
+    assert run(5.0).speed == 0
+    c.plan = (0, PLAN_MOVE, 10.0, 12.0, 20.0)  # 右に 10° で 20 cm
+    x = run(0.1)
+    assert x.steer == 10.0 and x.speed == 12.0 and c.station_wait == -1
+    run(20.0 / (12.0 * c.car.cm_s_per_speed))
+    assert c._ex_phase == "scan" and STOP_REASONS[c.last_step[1]] == "done"
+    assert abs(c.last_step[0] - 20.0 / 12.0) < 0.1
+    # 次の station。超音波で前が近いと途中で止めて、理由を残す
+    run(scan_s + 0.05)
+    assert c.station_wait == 1
+    c.plan = (1, PLAN_MOVE, 0.0, 12.0, 40.0)
+    run(0.5)
+    run(0.05, us=30.0)
+    assert STOP_REASONS[c.last_step[1]] == "ultrasonic"
+    # サーバーに届かない → Pi だけで決める。終わり → 待機
+    run(scan_s + 0.05)
+    c.plan = (2, PLAN_FALLBACK, 0.0, 0.0, 0.0)
+    assert run(0.1).speed > 0 and c._ex_phase == "drive"
+    c2, _ = _controller("explore")
+    c2.station_wait, c2._ex_phase, c2.plan = 0, "plan", (0, PLAN_DONE, 0, 0, 0)
+    c2.step(est, S, dt, 200.0)
+    assert c2.mode == "idle"
+
+
+def test_station_client_posts_and_writes_the_plan(tmp_path):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from types import SimpleNamespace
+
+    from snoo_trucar.control_proc import PLAN_N
+    from snoo_trucar.controller import PLAN_FALLBACK, PLAN_MOVE
+    from snoo_trucar.station import StationClient
+
+    got = {}
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            got["body"] = body
+            out = json.dumps({"action": "move", "steer_deg": -8, "speed": 12, "distance_cm": 30,
+                              "pose": {"x": 0, "y": 0, "yaw_deg": 0}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    cfg = Config()
+    cfg.server.map_url = f"http://127.0.0.1:{srv.server_port}/v1/snoo/map/station"
+    d = tmp_path / "explore_x"
+    d.mkdir()
+    (d / "00_a.jpg").write_bytes(b"jpg0")
+    (d / "d00001_b.jpg").write_bytes(b"jpg1")
+    rec = SimpleNamespace(dir=d, entries=[{"file": "00_a.jpg", "station": 0},
+                                          {"file": "d00001_b.jpg", "station": 1}])
+    plan = SeqBuffer(PLAN_N)
+    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=[0.0] * 22)
+    c = StationClient(runner, plan)
+    try:
+        c._session = "explore_x"
+        c._post(0, runner.last_cmd, rec)
+        assert b'"station_id": 0' in got["body"] and b"jpg0" in got["body"] and b"jpg1" not in got["body"]
+        assert tuple(plan.read()[1]) == (0, PLAN_MOVE, -8, 12, 30)
+        cfg.server.map_url = "http://127.0.0.1:1/nothing"  # 届かない → Pi だけで決める
+        c._post(1, runner.last_cmd, rec)
+        assert plan.read()[1][:2].tolist() == [1, PLAN_FALLBACK]
+    finally:
+        srv.shutdown()
+        plan.close()

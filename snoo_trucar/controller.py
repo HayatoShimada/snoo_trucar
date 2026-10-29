@@ -43,6 +43,9 @@ EXPLORE_US_TRUST_S = 60.0
 EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
+EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待って来なければ、Pi だけで決める（サーバーは 20 s で返す）
+PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
+STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck")
 CLEAR_NULL_STOP_NS = 300_000_000  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
 DRIVE_INDEX = -2  # 走っている間の scan_index（メインプロセスが一定の間隔で撮る）
 
@@ -92,6 +95,12 @@ class Controller:
         # サーバーが画像から出す通り道の空き（protocol.Reply.clear_cm）
         self.clear_state, self.clear_cm = 0, -1.0
         self._clear_null_since: int | None = None
+        # サーバーが決める探索（explore_server）。station_wait は返事を待っている station（-1 で待っていない）。
+        # plan は control_proc が入れる (station, action, steer_deg, speed, distance_cm)
+        self.station_wait = -1
+        self.plan = None
+        self.last_step = (0.0, 0)  # 直前の 1 歩の (秒, STOP_REASONS の番号)
+        self._ex_step = (0.0, 0.0, 0.0)
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
@@ -284,16 +293,56 @@ class Controller:
                 return (*poses[i], 0.0, 0.0)
             self._ex_stop += 1
             self._ex_t, self._ex_moved = 0.0, 0.0
-            clear = us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm
-            if clear:
-                self._ex_phase = "drive"
-            elif us_cm is not None:
-                self._ex_phase, self._ex_turns = "back", 0
+            if ctl.explore_server:
+                # 撮った分をメインプロセスがサーバーに送り、次の 1 歩をもらうまで止まって待つ
+                self._ex_phase, self.station_wait = "plan", self._ex_stop - 1
+                self.cmd.scan_index = -1
+                return 0.0, 0.0, 0.0, 0.0
+            if not self._ex_local_next(us_cm):
+                return 0.0, 0.0, 0.0, 0.0
+        if self._ex_phase == "plan":
+            self.cmd.scan_index = -1
+            p = self.plan
+            if p is not None and int(p[0]) == self.station_wait:
+                self.station_wait = -1
+                action = int(p[1])
+                if action == PLAN_DONE:
+                    self.set_mode("idle")  # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
+                    return 0.0, 0.0, 0.0, 0.0
+                if action == PLAN_MOVE:
+                    speed = p[3] if 0 < p[3] <= ctl.explore_speed else ctl.explore_speed
+                    steer = max(-car.steer_max, min(car.steer_max, p[2]))
+                    self._ex_step = (steer, speed, min(p[4], ctl.explore_step_cm))
+                    self._ex_phase, self._ex_t, self._ex_moved = "step", 0.0, 0.0
+                elif not self._ex_local_next(us_cm):  # サーバーに届かない → Pi だけの探索
+                    return 0.0, 0.0, 0.0, 0.0
+            elif self._ex_t >= EXPLORE_PLAN_TIMEOUT_S:
+                self.station_wait = -1
+                if not self._ex_local_next(us_cm):
+                    return 0.0, 0.0, 0.0, 0.0
             else:
-                # 超音波がずっと測れない（壊れている・つながっていない）。前も見えないので動かず、その場で撮り直す
-                self._ex_phase = "scan"
                 return 0.0, 0.0, 0.0, 0.0
         self.cmd.scan_index = DRIVE_INDEX
+        if self._ex_phase == "step":
+            # サーバーが決めた 1 歩（前向きの弧）。止まったら、理由を次の station で伝える
+            steer, speed, dist = self._ex_step
+            reason = None
+            if self.stuck:
+                reason, self.stuck = "stuck", False
+            elif us_cm is None or us_cm < ctl.explore_clear_cm:
+                reason = "ultrasonic"
+            elif self.clear_blocked() == "near":
+                reason = "clear"
+            elif self.clear_blocked() == "unknown":
+                reason = "clear_unknown"
+            elif self._ex_moved >= dist:
+                reason = "done"
+            if reason is not None:
+                self.last_step = (self._ex_t, STOP_REASONS.index(reason))
+                self._ex_phase, self._ex_t = "scan", 0.0
+                return 0.0, 0.0, 0.0, 0.0
+            self._ex_moved += speed * car.cm_s_per_speed * dt
+            return 0.0, 0.0, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
             # ぶつかった・詰まった。進んでいたなら下がって向きを変え、下がっていたなら止まって測り直す
             self._ex_phase = "check" if self._ex_phase == "back" else "back"
@@ -339,6 +388,20 @@ class Controller:
             else:
                 self._ex_phase = "scan"  # 一回りしても空いていない。ここで撮り直す
         return 0.0, 0.0, 0.0, 0.0
+
+    def _ex_local_next(self, us_cm: float | None) -> bool:
+        """Pi だけで次を決める（サーバーを使わない・届かないとき）。動くなら True"""
+        ctl = self.ctl
+        self._ex_t, self._ex_moved = 0.0, 0.0
+        if us_cm is not None and us_cm >= ctl.explore_clear_cm + ctl.explore_step_cm:
+            self._ex_phase = "drive"
+        elif us_cm is not None:
+            self._ex_phase, self._ex_turns = "back", 0
+        else:
+            # 超音波がずっと測れない（壊れている・つながっていない）。前も見えないので動かず、その場で撮り直す
+            self._ex_phase = "scan"
+            return False
+        return True
 
     def _map(self, dt: float):
         poses = [(p, t) for t in MAP_TILTS for p in MAP_PANS]

@@ -59,6 +59,8 @@ class Runner:
         self.trace: Trace | None = None
         self.motion = None  # MotionWatch（実機のときだけ）
         self.recorder = None
+        self.station = None
+        self.battery_v: float | None = None
 
     def run(self) -> None:
         cfg = self.cfg
@@ -67,12 +69,13 @@ class Runner:
         cmd = SeqBuffer(control_proc.CMD_N)
         self.mode_buf = mode = SeqBuffer(control_proc.MODE_N)
         clear = SeqBuffer(control_proc.CLEAR_N)
+        plan = SeqBuffer(control_proc.PLAN_N)
         self.set_mode(cfg.control.mode)
         ctx = mp.get_context("fork")
         proc_stop = ctx.Event()
         proc = ctx.Process(
             target=control_proc.run,
-            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name),
+            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name),
             name="snoo-control",
             daemon=True,
         )
@@ -137,6 +140,10 @@ class Runner:
             threads.append(
                 threading.Thread(target=camera_loop, args=(camera, self.link, self.stop, on_frame))
             )
+            from .station import StationClient
+
+            self.station = StationClient(self, plan)
+            threads.append(threading.Thread(target=self.station.run, args=(self.stop,)))
             if self.buttons:
                 from .buttons import Panel
 
@@ -166,7 +173,7 @@ class Runner:
                 self.link.close()
             if self.trace is not None:
                 self.trace.close()
-            for b in (meas, us, cmd, mode, clear):
+            for b in (meas, us, cmd, mode, clear, plan):
                 b.close()
 
     def set_mode(self, mode: str) -> None:
@@ -196,7 +203,8 @@ class Runner:
     def _battery_loop(self, car) -> None:
         low_v = self.cfg.car.battery_low_v
         while not self.stop.is_set():
-            label, ok = battery_state(car.read_battery(), low_v)
+            self.battery_v = car.read_battery()
+            label, ok = battery_state(self.battery_v, low_v)
             if ok != self.battery[1] and not self.quiet:
                 print(label, flush=True)
             self.battery = (label, ok)
@@ -257,6 +265,8 @@ class Runner:
         if self.motion is not None and abs(v[2]) > 0.5:
             m = self.motion
             s += f" | 画像の動き={m.diff:.1f}（止まっているとき {m.noise:.1f}）" + (" 詰まった" if m.stuck else "")
+        if self.station is not None and MODES[int(v[14])] == "explore" and self.station.last:
+            s += f" | {self.station.last}"
         if int(v[17]) != OK:
             s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"

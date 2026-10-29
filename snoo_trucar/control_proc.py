@@ -26,17 +26,21 @@ MODE_N = 1
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
 #      loop_hz, jitter_p99_us, overruns, scan_index, mode,
 #      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
-#      guard（guard.OK / BACKOFF / HOLD / REST）
-CMD_N = 18
+#      guard（guard.OK / BACKOFF / HOLD / REST）,
+#      station_wait（サーバーの返事を待っている station、-1 で待っていない）, last_step_s, last_step_reason,
+#      ex_station（explore で今の station。走っている間は次の station）
+CMD_N = 22
 # clear: t_capture_ns, cm, state（0: 返事に欄が無い / 1: 値がある / 2: null。protocol.Reply）
 CLEAR_N = 3
+# plan: station, action（controller.PLAN_*）, steer_deg, speed, distance_cm
+PLAN_N = 5
 CLEAR_MAX_AGE_NS = 500_000_000  # これより古い clear_cm は使わない（欄が無いのと同じ）
 US_MAX_AGE_NS = 300_000_000
 SPIN_NS = 150_000  # これより残りが短ければ sleep せずに回って待つ
 
 
 def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str,
-        stop_event, clear_name: str | None = None) -> None:  # fmt: skip
+        stop_event, clear_name: str | None = None, plan_name: str | None = None) -> None:  # fmt: skip
     ctl = cfg.control
     if ctl.cpu >= 0:
         try:
@@ -47,6 +51,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
     mode_buf = SeqBuffer(MODE_N, mode_name)
     clear_buf = SeqBuffer(CLEAR_N, clear_name) if clear_name else None
     last_clear = 0
+    plan_buf = SeqBuffer(PLAN_N, plan_name) if plan_name else None
+    last_plan = 0
     clear_t = 0
     est = TargetEstimator(cfg.camera.hfov_deg, cfg.camera.vfov_deg, ctl.distance_k)
     controller = Controller(ctl, cfg.car)
@@ -90,6 +96,12 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                     clear_t = 0
                     controller.set_clear(0, -1.0, now)
 
+            if plan_buf is not None:
+                r = plan_buf.read()
+                if r is not None and r[0] != last_plan:
+                    last_plan = r[0]
+                    controller.plan = tuple(r[1])
+
             r = mode_buf.read()
             if r is not None and r[0] != last_mode:
                 last_mode = r[0]
@@ -114,6 +126,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 now, cmd.steer, cmd.speed, cmd.pan, cmd.tilt, cmd.state, float(est.valid),
                 est.bearing.x[0], est.dist.x[0], min(since, 1e6), loop_hz, p99, overruns,
                 cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns, cmd.guard,
+                controller.station_wait, *controller.last_step, controller._ex_stop,
             )  # fmt: skip
             out.write(out_vals)
 
@@ -142,4 +155,6 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
         mode_buf.close()
         if clear_buf is not None:
             clear_buf.close()
+        if plan_buf is not None:
+            plan_buf.close()
         out.close()
