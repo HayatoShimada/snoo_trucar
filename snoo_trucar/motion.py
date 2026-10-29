@@ -19,6 +19,11 @@ DT_S = 1.0  # これだけ前の画像と比べる
 NOISE_GAP_S = 0.2  # 止まっているときのざらつきは、この間をあけた 2 枚で測る
 WARMUP_S = 1.2  # 走り始めてからこの間は判定しない（動き出し）
 STUCK_HOLD_S = 1.0  # 動いていないのがこれだけ続いたら、進めていないとみなす
+# 下がるのは 30 cm まで（速さ 15 で約 1.2 s）なので、上の値（最短 2.2 s）では終わるまで気づけない。
+# 下がるときは短く見る（5 Hz で比べるので、走り出しから 0.8〜1.0 s で気づく）。後ろは見えず、
+# ぶつかっても他に気づく手段が無いので、早めに止める方を取る
+WARMUP_REVERSE_S = 0.4
+STUCK_HOLD_REVERSE_S = 0.4
 FACTOR = 1.3  # 止まっているときのざらつきの何倍より小さければ、動いていないとみなす（走っている 1 秒差は 10 以上、止まっているときは 6〜7 以下）
 NOISE_FLOOR = 2.0
 
@@ -38,20 +43,25 @@ class MotionWatch:
         self._moving_since: float | None = None
         self._still_since: float | None = None
         self._slow_since: float | None = None
+        self._reverse = False
         self.stuck = False
 
     def due(self, t: float) -> bool:
         """この時刻の画像を縮めて渡すべきか（重い JPEG の展開を間引くため）"""
         return t - self._last >= 1.0 / SAMPLE_HZ
 
-    def feed(self, t: float, small: np.ndarray, moving: bool) -> bool:
-        """small は shrink() したもの。moving は前後に走らせているか（ハンドルだけ・首だけは含めない）"""
+    def feed(self, t: float, small: np.ndarray, moving: bool, reverse: bool = False) -> bool:
+        """small は shrink() したもの。moving は前後に走らせているか（ハンドルだけ・首だけは含めない）。
+        reverse は下がっているか"""
         self._last = t
         if moving:
             self._still_since = None
-            if self._moving_since is None:
+            if self._moving_since is None or reverse != self._reverse:
+                # 走り出した・向きが変わった。進んですぐ下がると、1 秒前と同じ所に戻って似た画像になるので
+                # 動き出しから数え直す
                 self._moving_since = t
                 self._slow_since = None
+                self._reverse = reverse
         else:
             self._moving_since = None
             self._slow_since = None
@@ -64,7 +74,8 @@ class MotionWatch:
                 d = float(np.abs(small - prev).mean())
                 self.noise = 0.8 * self.noise + 0.2 * d
         self._hist.append((t, small))
-        if self._moving_since is None or t - self._moving_since < WARMUP_S:
+        warmup, hold = (WARMUP_REVERSE_S, STUCK_HOLD_REVERSE_S) if self._reverse else (WARMUP_S, STUCK_HOLD_S)
+        if self._moving_since is None or t - self._moving_since < warmup:
             return self.stuck
         prev = self._at(t - DT_S)
         if prev is None:
@@ -73,7 +84,7 @@ class MotionWatch:
         if self.diff < FACTOR * max(self.noise, NOISE_FLOOR):
             if self._slow_since is None:
                 self._slow_since = t
-            self.stuck = t - self._slow_since >= STUCK_HOLD_S
+            self.stuck = t - self._slow_since >= hold
         else:
             self._slow_since = None
             self.stuck = False

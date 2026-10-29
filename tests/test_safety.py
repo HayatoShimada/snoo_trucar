@@ -455,3 +455,78 @@ def test_runner_stops_the_car_when_a_thread_dies():
     with pytest.raises(ThreadDied):
         r._actuate_loop(car, TornCmd(1000))
     assert car.log[-1] == ("stop",)
+
+
+def test_pi_only_reverse_is_at_most_30cm():
+    """Pi だけの切り返しで下がるのも、サーバーの 1 歩と同じく 30 cm まで（後ろは見えない）"""
+    c, ctl, est = _explore()
+    ctl.explore_server = False
+    k = Clock(c, est)
+    c._ex_phase, c._ex_t = "back", 0.0
+    back = 0
+    while True:  # 初めの 1 回の下がり
+        k.t += int(DT * S)
+        if c.step(est, k.t, DT, 40.0).speed >= 0:
+            break
+        back += 1
+    v = ctl.explore_speed * c.car.cm_s_per_speed
+    assert back > 0 and back * DT * v <= ctl.explore_reverse_max_cm + 0.5
+
+
+def _frames():
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    scene = rng.uniform(0, 255, (60, 200)).astype(np.float32)
+
+    def frame(x):
+        a = scene[:, x : x + 80] + rng.normal(0, 3, (60, 80))
+        return a - a.mean()
+
+    return frame
+
+
+def test_motion_watch_notices_a_stuck_reverse_quickly():
+    """下がる（30 cm で 1.2 s ほど）間にも詰まりに気づく。前に進むときは今までどおり"""
+    from snoo_trucar.motion import MotionWatch
+
+    frame = _frames()
+    w = MotionWatch()
+    t = 0.0
+    for _ in range(10):
+        w.feed(t, frame(0), False)
+        t += 0.2
+    t0, hit = t, None
+    while t - t0 < 2.0:
+        if w.feed(t, frame(0), True, reverse=True) and hit is None:
+            hit = t - t0
+        t += 0.2
+    assert hit is not None and hit <= 1.0 + 1e-6
+    # 前に進むときは、動き出しを長めに見る（今までどおり 1 s 以内では詰まりとしない）
+    w2 = MotionWatch()
+    t = 0.0
+    for _ in range(10):
+        w2.feed(t, frame(0), False)
+        t += 0.2
+    t0 = t
+    while t - t0 < 1.1:
+        assert not w2.feed(t, frame(0), True)
+        t += 0.2
+
+
+def test_motion_watch_restarts_when_the_direction_changes():
+    """進む → すぐ下がるで元の場所に戻ると、1 秒前の画像と似ている。向きが変わったら測り直す"""
+    from snoo_trucar.motion import MotionWatch
+
+    frame = _frames()
+    w = MotionWatch()
+    t = 0.0
+    for _ in range(10):
+        w.feed(t, frame(0), False)
+        t += 0.2
+    for k in range(15):
+        w.feed(t, frame(k * 4), True)
+        t += 0.2
+    assert abs(w._moving_since - 10 * 0.2) < 1e-6
+    w.feed(t, frame(56), True, reverse=True)
+    assert w._moving_since == t  # 動き出しから数え直す

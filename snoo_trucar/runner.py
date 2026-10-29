@@ -160,7 +160,7 @@ class Runner:
                     gray = simplejpeg.decode_jpeg(jpeg, colorspace="GRAY", min_height=60, min_width=80)
                     v = self.last_cmd
                     moving = v is not None and abs(v[2]) > 0.5 and self.battery[1]
-                    self.motion.feed(t, shrink(gray), moving)
+                    self.motion.feed(t, shrink(gray), moving, reverse=v is not None and v[2] < 0)
                 recorder.offer(t_ns, jpeg, self.last_cmd, self.last_us)
 
             threads.append(self._thread("受信", self.link.receive_forever, self.stop))

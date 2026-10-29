@@ -513,7 +513,10 @@ class Controller:
         # 下がるのは後ろが見えないので短く。進む間は超音波が近ければやめる
         d = self._ex_turn_dir * car.steer_max
         if self._ex_phase == "back":
-            if self._ex_t < ctl.explore_turn_s:
+            # 下がるのはサーバーの 1 歩と同じく explore_reverse_max_cm まで（1.5 s では 38 cm 下がっていた）
+            back_s = min(ctl.explore_turn_s,
+                         ctl.explore_reverse_max_cm / (ctl.explore_speed * car.cm_s_per_speed))  # fmt: skip
+            if self._ex_t < back_s:
                 return 0.0, DRIVE_TILT, d, -ctl.explore_speed
             self._ex_phase, self._ex_t = "fwd", 0.0
         if self._ex_phase == "fwd":
