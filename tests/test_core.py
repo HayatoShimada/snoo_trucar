@@ -700,3 +700,23 @@ def test_explore_server_segments_and_reverse():
     back = [o for o in out if o[1] < 0]
     assert all(o[0] == 20.0 for o in back)
     assert abs(len(back) * dt - ctl.explore_reverse_max_cm / v) < 0.05
+
+
+def test_explore_passes_low_obstacles():
+    from snoo_trucar.controller import LOW_OBSTACLE_SPEED, PLAN_MOVE, STOP_REASONS
+
+    est = TargetEstimator(53.5, 41.4, 33.0)
+    c, ctl = _controller("explore")
+    dt = 0.01
+    c._ex_phase, c.station_wait, c.plan = "plan", 0, (0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
+    c.step(est, S, dt, 200.0)
+    # 画像では 20 cm 先に何かある。超音波は 70 cm → 低い物。遅くして越える
+    c.set_clear(1, 20.0, S)
+    x = c.step(est, S, dt, 70.0)
+    assert x.speed == LOW_OBSTACLE_SPEED and c.low_passed == 1
+    # 超音波も近い → 止まる
+    c2, _ = _controller("explore")
+    c2._ex_phase, c2.station_wait, c2.plan = "plan", 0, (0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
+    c2.step(est, S, dt, 200.0)
+    c2.set_clear(1, 20.0, S)
+    assert c2.step(est, S, dt, 40.0).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear"

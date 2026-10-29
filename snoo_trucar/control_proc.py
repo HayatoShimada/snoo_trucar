@@ -28,8 +28,8 @@ MODE_N = 1
 #      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
 #      guard（guard.OK / BACKOFF / HOLD / REST）,
 #      station_wait（サーバーの返事を待っている station、-1 で待っていない）, last_step_s, last_step_reason,
-#      ex_station（explore で今の station。走っている間は次の station）
-CMD_N = 22
+#      ex_station（explore で今の station。走っている間は次の station）, low_passed（直前の 1 歩で低い物を越えた回数）
+CMD_N = 23
 # clear: t_capture_ns, cm, state（0: 返事に欄が無い / 1: 値がある / 2: null。protocol.Reply）
 CLEAR_N = 3
 # plan: station, action（controller.PLAN_*）, speed（負なら下がる）, 区切りの数,
@@ -127,7 +127,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 now, cmd.steer, cmd.speed, cmd.pan, cmd.tilt, cmd.state, float(est.valid),
                 est.bearing.x[0], est.dist.x[0], min(since, 1e6), loop_hz, p99, overruns,
                 cmd.scan_index, MODES.index(controller.mode), used_capture, used_ns, cmd.guard,
-                controller.station_wait, *controller.last_step, controller._ex_stop,
+                controller.station_wait, *controller.last_step, controller._ex_stop, controller.low_passed,
             )  # fmt: skip
             out.write(out_vals)
 

@@ -52,7 +52,8 @@ class StationClient:
                         "segments": [{"steer_deg": s, "distance_cm": d} for s, d in segs],
                         "seconds": round(secs, 2),
                         "est_distance_cm": round(abs(speed) * self.cfg.car.cm_s_per_speed * secs, 1),
-                        "stop_reason": reason}  # fmt: skip
+                        "stop_reason": reason,
+                        "low_obstacle_passed": int(v[22]) if len(v) > 22 else 0}  # fmt: skip
             else:
                 prev = {"stop_reason": "local"}  # 前の 1 歩は Pi だけで決めた
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,

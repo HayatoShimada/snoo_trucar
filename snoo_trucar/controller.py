@@ -47,7 +47,12 @@ EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待って�
 PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
 MAX_SEGMENTS = 3  # サーバーの 1 歩の区切り（segments）の数の上限
 STOP_REASONS = ("", "done", "ultrasonic", "clear", "clear_unknown", "stuck")
-CLEAR_NULL_STOP_NS = 300_000_000  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
+CLEAR_NULL_STOP_NS = 300_000_000
+# clear_cm が近くても、超音波がそれより LOW_OBSTACLE_GAP_CM 以上先なら低い物とみなし、
+# LOW_OBSTACLE_SPEED に落として LOW_OBSTACLE_CM だけ越える（2026-10-29、ラグの縁で止まっていた）
+LOW_OBSTACLE_GAP_CM = 25.0
+LOW_OBSTACLE_SPEED = 10.0
+LOW_OBSTACLE_CM = 20.0  # clear_cm が null（間に合わない）のがこれだけ続いたら止まる
 DRIVE_INDEX = -2
 # 走っている間のカメラ。サーバーが画像から通り道の空き（clear_cm）を出すので、少し下を向けて車の前を入れる
 # （HFOV 54° だと車幅が画面に入るのは、tilt -15° で前端から約 13 cm 先から）。曲がるときは曲がる方へ首を向ける
@@ -112,6 +117,8 @@ class Controller:
         self.last_step = (0.0, 0)  # 直前の 1 歩の (秒, STOP_REASONS の番号)
         self._ex_step: tuple[float, list[tuple[float, float]]] = (0.0, [])  # (速さ, [(ハンドル, cm)])
         self._ex_seg = 0
+        self._low_left = 0.0  # 低い物を越えている残りの距離（cm）
+        self.low_passed = 0  # この 1 歩で低い物を越えた回数（次の station で伝える）
         self._now_ns = 0  # 超音波が最後に測れた時刻（explore の経過時間）
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
 
@@ -292,6 +299,7 @@ class Controller:
             self.set_mode("idle")
             return 0.0, 0.0, 0.0, 0.0
         self._ex_t += dt
+        us_real = us_cm  # 実際に測れた値（-1 を遠いとみなす前）
         if us_cm is not None:
             self._ex_us_at = self._ex_total
         elif self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
@@ -335,6 +343,7 @@ class Controller:
                             segs.append((steer, d))
                     self._ex_step = (-speed if back else speed, segs)
                     self._ex_phase, self._ex_t, self._ex_moved, self._ex_seg = "step", 0.0, 0.0, 0
+                    self._low_left, self.low_passed = 0.0, 0
                 elif not self._ex_local_next(us_cm):  # サーバーに届かない → Pi だけの探索
                     return 0.0, 0.0, 0.0, 0.0
             elif self._ex_t >= EXPLORE_PLAN_TIMEOUT_S:
@@ -357,8 +366,14 @@ class Controller:
                 reason, self.stuck = "stuck", False
             elif fwd and (us_cm is None or us_cm < ctl.explore_step_stop_cm):
                 reason = "ultrasonic"
-            elif fwd and self.clear_blocked() == "near":
-                reason = "clear"
+            elif fwd and self.clear_blocked() == "near" and self._low_left <= 0:
+                if us_real is not None and us_real >= self.clear_cm + LOW_OBSTACLE_GAP_CM:
+                    # 画像では近いのに、超音波（床から 4.5 cm）はずっと先を見ている → 低い物（ラグの縁・
+                    # ケーブル・敷居）。止まらずに遅くして越える。引っかかれば画像が動かなくなって止まる
+                    self._low_left = LOW_OBSTACLE_CM
+                    self.low_passed += 1
+                else:
+                    reason = "clear"
             elif fwd and self.clear_blocked() == "unknown":
                 reason = "clear_unknown"
             elif self._ex_seg >= len(segs):
@@ -367,6 +382,9 @@ class Controller:
                 self.last_step = (self._ex_t, STOP_REASONS.index(reason))
                 self._ex_phase, self._ex_t = "scan", 0.0
                 return 0.0, 0.0, 0.0, 0.0
+            if self._low_left > 0:
+                speed = min(speed, LOW_OBSTACLE_SPEED)
+                self._low_left -= speed * car.cm_s_per_speed * dt
             self._ex_moved += abs(speed) * car.cm_s_per_speed * dt
             return (_drive_pan(steer) if fwd else 0.0), DRIVE_TILT, steer, speed
         if self.stuck and self._ex_phase in ("drive", "fwd", "back"):
