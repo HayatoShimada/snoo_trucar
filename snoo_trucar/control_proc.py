@@ -101,7 +101,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 r = plan_buf.read()
                 if r is not None and r[0] != last_plan:
                     last_plan = r[0]
-                    controller.plan = tuple(r[1])
+                    controller.set_plan(r[1])
 
             r = mode_buf.read()
             if r is not None and r[0] != last_mode:

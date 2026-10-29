@@ -92,5 +92,9 @@ class StationClient:
         except Exception as e:  # 届かない・失敗 → Pi だけで決める
             self._last_move = None
             self.last = f"station {k}: 地図のサーバーに届かない（{type(e).__name__}: {str(e)[:80]}）→ Pi だけで決める"
+        if rec.dir is None or rec.dir.name != self._session:
+            # 返事を待つ間に explore をやめた・始め直した。前の explore の 1 歩は渡さない
+            print(f"station {k}: 返事の前に explore が替わったので捨てる", flush=True)
+            return
         self.plan_buf.write(plan)
         print(f"{self.last}（{len(entries)} 枚、{time.monotonic() - t0:.1f}s）", flush=True)

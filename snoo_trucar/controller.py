@@ -177,8 +177,29 @@ class Controller:
             self._map_t = 0.0
             self._search_t = 0.0
             self._arc_left = 0.0
-            self._ex_phase, self._ex_t, self._ex_stop = "scan", 0.0, 0
-            self._ex_total = 0.0
+            self._reset_explore()
+
+    def _reset_explore(self) -> None:
+        """explore の状態をすべて始めに戻す。前の explore の 1 歩・待っている station・撮る予定が
+        残っていると、次の explore の station 0 で、サーバーに聞かずに前の 1 歩を走ってしまう"""
+        self._ex_phase, self._ex_t, self._ex_stop = "scan", 0.0, 0
+        self._ex_total = 0.0
+        self._ex_moved = 0.0
+        self._ex_turns = 0
+        self._ex_us_at = -1e9  # _ex_total で数えるので、始め直したら前の時刻は使えない
+        self.station_wait = -1
+        self.plan = None
+        self.last_step = (0.0, 0)
+        self._ex_step = (0.0, [])
+        self._ex_seg = 0
+        self._ex_sched, self._ex_sched_stop = [], -1
+        self._low_left, self.low_passed = 0.0, 0
+
+    def set_plan(self, plan) -> None:
+        """サーバーの 1 歩（control_proc が plan の共有メモリから入れる）。返事を待っている station の分
+        だけ受ける。待っていないときに来たもの（前の explore の遅れた返事など）は捨てる"""
+        if self.station_wait >= 0 and int(plan[0]) == self.station_wait:
+            self.plan = tuple(plan)
 
     def step(self, est: TargetEstimator, now_ns: int, dt: float, ultrasonic_cm: float | None):
         ctl, car, cmd = self.ctl, self.car, self.cmd
