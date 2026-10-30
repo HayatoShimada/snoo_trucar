@@ -71,6 +71,12 @@ EXPLORE_US_TRUST_S = 1.0
 # 止めるのは、測れた近い値が US_NEAR_STOP_NS 続いたとき（15 Hz で 2 回続けて近い）だけ。
 # EXPLORE_US_TRUST_S だけでは、超音波がほぼ -1 の探索で、1 歩がみな 0 cm で止まっていた
 US_NEAR_STOP_NS = 100_000_000
+# 検出のサーバーは、走っている（flags に MOVING）フレームにだけ clear_cm（か clear_skip）を返す。
+# 1 歩を始めた瞬間は止まっていたフレームの返事しか無く、clear の欄が無い（CLEAR_ABSENT）。
+# そのとき超音波が -1 だと、走り出す前に ultrasonic で止まっていた（2026-10-30 23:10 の探索は
+# 23 か所すべて 0 cm）。走り出してからこの間は、欄が無くても止めずに待つ（ふつう 0.1 s で skip が来る）。
+# clear_cm を返さない古いサーバーなら、この後は今までどおり超音波で決める
+CLEAR_ABSENT_GRACE_S = 0.5
 EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
@@ -510,7 +516,8 @@ class Controller:
             reason = None
             if self.stuck:
                 reason, self.stuck = "stuck", False
-            elif fwd and (us_near or (self.clear_state == CLEAR_ABSENT and us_unsure)):
+            elif fwd and (us_near or (self.clear_state == CLEAR_ABSENT and us_unsure
+                                      and (self.us_stale or self._ex_t >= CLEAR_ABSENT_GRACE_S))):
                 # clear_cm を出さないサーバーでは、前を見るのは超音波だけ。分からなければ止まる
                 reason = "ultrasonic"
             elif fwd and blocked == "near" and self._low_left <= 0:
