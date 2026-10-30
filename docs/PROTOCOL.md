@@ -100,7 +100,8 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
   `"segments": [{"steer_deg", "distance_cm"}, …]`（曲がってからまっすぐ、など。3 つまで。`"long_step"` で最後のまっすぐは 60 cm まで、Pi は合わせて 80 cm で切る）。
   `prev_step` には `reverse` と、走った `segments` も入れる。
   Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、前に進むときは超音波（`explore_step_stop_cm`、30 cm）・clear_cm、
-  どちらの向きでも画像が動かないときは途中で止める
+  どちらの向きでも画像が動かないときは途中で止める。超音波で止めるのは、測れた近い値が 0.1 s（2 回）続いたときだけ。
+  -1・古い値は情報なしとして止めない（clear_cm を出さないサーバーのときだけ、-1 でも止める）
   （`stop_reason`: done / ultrasonic / clear / clear_unknown / stuck / clear_skip）
 - 20 s で返事が無い・失敗したら、Pi だけで次を決める（超音波で前が空いていれば進み、塞がっていれば切り返す）
 - 地図は `GET http://192.168.0.248:8720/v1/snoo/map/<session_id>/topdown.png`
