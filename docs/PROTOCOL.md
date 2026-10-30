@@ -68,7 +68,7 @@ UTF-8 の JSON 1 つ。
 | `dets[].cat` | 猫である確からしさ（0..1） |
 | `dets[].snoo` | snoo である確からしさ（0..1）。判定できないときは `null`（Pi 側は `require_snoo = false` で猫なら追う） |
 | `dets[].play` | 任意。遊びの様子 `{"state": "stalk", "p": {"attention", "stalk", "pounce", "bored", "stress"}}`（各 0..1）。判定できないときは `null` か省く。Pi は今 `p.stress` だけを使う（`snoo_trucar/guard.py`: 0.8 以上を 1 回、0.5 以上を 3 回続けて見たら止まって下がる） |
-| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は超音波だけで走る）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える。大きく曲がっていて通り道が画面に入らないとき・下がっているときは欄を出さず、`clear_skip`（`"out_of_view"` / `"reversing"`）を出す。サーバーの 1 歩では、返事が 0.5 s 途切れた（clear_cm が古い）のも null と同じに扱う。`clear_skip` が続く間は止めないが、超音波が 60 cm より先を測れていなければ速さ 10・20 cm まで |
+| `clear_cm`・`clear_conf` | 任意（上の階層）。走っている間の、これから走る弧の通り道で最初の障害物までの距離（cm）と確からしさ。**欄が無い** = 出していない（Pi は 0.5 s 待ってから clear_skip と同じく遅く・20 cm まで）。**null** = 出そうとしたが間に合わなかった（Pi は null が 0.3 s 続いたら止まって撮り直す）。値が `explore_clear_stop_cm`（既定 25）より近ければ、進むのをやめて向きを変える。大きく曲がっていて通り道が画面に入らないとき・下がっているときは欄を出さず、`clear_skip`（`"out_of_view"` / `"reversing"`）を出す。サーバーの 1 歩では、返事が 0.5 s 途切れた（clear_cm が古い）のも null と同じに扱う。`clear_skip` が続く間は止めないが、速さ 10・20 cm まで |
 
 Pi は `cat ≥ 0.35` かつ `snoo ≥ 0.6` の中から `cat × snoo` が最大の箱を snoo とみなす（`config.toml` の `[control]` で変えられる）。
 
@@ -90,18 +90,25 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
 
 - `meta`: scan.json の形の JSON。`frames[]` はこの station の画像（前の station から走ってくる間の分も）。
   加えて `session_id`（explore_日時）、`station_id`（0, 1, …）、`prev_step`（`{steer_deg, speed, seconds, est_distance_cm, stop_reason}`、
-  最初は null、Pi だけで決めた後は `{"stop_reason": "local"}`。`speed` は Pi が上限で抑えた後の速さ、`segments` は実際に走った区切りまで
+  最初は null。`speed` は Pi が上限で抑えた後の速さ、`segments` は実際に走った区切りまで
   （止まった区切りは止まった所まで）、`est_distance_cm` は guard・電池を通した後の速さで数えた距離。待たされた間は進んだことにしない）、`battery_v`、`ultrasonic_cm`、`camera_height_cm`（8.0、ユーザーが測った）
 - 止まって撮った画像（`moving` でない）の `frames[i].dets` に、その画像の検出の猫の箱 `[{"box": [x1, y1, x2, y2], "cat"}]` を付ける
   （撮った時刻で返事と突き合わせる。返事が無ければ付けない）。地図のサーバーは、その中の点を地図に入れない
 - `images`: 1 枚ずつ。ファイル名は `frames[].file`
 - 返事: `{"action": "move", "steer_deg", "speed", "distance_cm", "pose": {x, y, yaw_deg}}` か `{"action": "done", "reason"}`。
-  meta の `"supports": ["reverse", "segments"]` を見て、サーバーは次も返す: `"reverse": true`（同じハンドルで下がる。30 cm まで）、
-  `"segments": [{"steer_deg", "distance_cm"}, …]`（曲がってからまっすぐ、など。3 つまで。`"long_step"` で最後のまっすぐは 60 cm まで、Pi は合わせて 80 cm で切る）。
-  `prev_step` には `reverse` と、走った `segments` も入れる。
-  Pi は速さを `explore_speed`、1 歩を `explore_step_cm` までに抑え、前に進むときは超音波（`explore_step_stop_cm`、30 cm）・clear_cm、
-  どちらの向きでも画像が動かないときは途中で止める。超音波で止めるのは、測れた近い値が 0.1 s（2 回）続いたときだけ。
-  -1・古い値は情報なしとして止めない（clear_cm を出さないサーバーのときだけ、-1 でも止める）
-  （`stop_reason`: done / ultrasonic / clear / clear_unknown / stuck / clear_skip）
-- 20 s で返事が無い・失敗したら、Pi だけで次を決める（超音波で前が空いていれば進み、塞がっていれば切り返す）
+  道はサーバーがすべて決め、Pi はそのとおり走る（Pi では道を決めない）。meta の `"supports"` に
+  `["reverse", "segments", "long_step", "gear_segments"]` を書くと、サーバーは区切りの列を返す
+  （詳しくは rocm_opencv_server の `docs/snoo_explore_protocol.md`）:
+  `"segments": [{"steer_deg", "distance_cm", "reverse", "end_pose", "min_clear_cm"}, …]`（5 つまで。区切りごとに前・後ろ）、
+  `"speed"`（前の速さ）、`"reverse_speed"`（後ろの速さ）。`reverse` の無い区切りは返事の `reverse` に従う（前の版のサーバー）。
+  Pi は速さを `explore_speed`、前への区切りを合わせて `explore_server_step_cm`（80 cm）、後ろへの区切りを合わせて
+  `explore_reverse_max_cm`（30 cm）までに抑える。前と後ろを替えるときは 0.3 s 止まる。
+- 止まるのは反射の安全だけ: 前へ走る区切りで clear_cm が `max(explore_clear_stop_cm, min_clear_cm)` より近い（clear）・
+  null か古いのが 0.3 s 続いた（clear_unknown）・clear_skip か欄が無いまま 20 cm 走った（clear_skip。その間は速さ 10）、
+  どちらの向きでも画像が動かない（stuck）、guard・電池・USR。超音波では止まらない（`stop_reason` の `ultrasonic` は前の版だけ）。
+  止まったら別の道を考えず、走った分を次の station の `prev_step` で返して撮る
+- `prev_step` の `segments` は実際に走った区切りまで（止まった区切りは止まった所まで）で、区切りごとに `reverse` を付ける。
+  `reverse` は全部の区切りが後ろへのとき true。`est_distance_cm` は guard・電池を通した後の速さで数えた距離の合計
+- 超音波は、測れたときだけ `"ultrasonic": {"cm", "t_ns"}`（測った時刻、monotonic）を meta に付ける（地図の弱い証拠）
+- 返事が無い・失敗したら、3 秒おきに同じ station を送り直して待つ（止まったまま。explore_max_s で待機に戻る）
 - 地図は `GET http://192.168.0.248:8720/v1/snoo/map/<session_id>/topdown.png`

@@ -62,6 +62,7 @@ class Runner:
         self.camera_file = camera_file
         self.mode_buf: SeqBuffer | None = None
         self.last_us: float | None = None
+        self.last_us_t_ns = 0  # 超音波が最後に測れた時刻（monotonic_ns）
         self.stop = threading.Event()
         self.history: list[tuple] = []  # (t, state, bearing_est, dist_est, bearing_true, dist_true)
         self.world = None
@@ -234,22 +235,23 @@ class Runner:
             try:
                 cm = car.read_ultrasonic()
             except Exception as e:
-                # 読めなかった。書かずにおく（古くなると、制御プロセスは explore で前に進まない）
+                # 読めなかった。超音波では止まらないので、stuck・drive_ok だけは渡す
                 errors(e)
-                self.stop.wait(period)
-                continue
+                cm = None
             if self.trace is not None:
                 self.trace.loop("超音波1回", (time.monotonic() - t0) * 1000)
             self.last_us = cm
+            if cm is not None:
+                self.last_us_t_ns = time.monotonic_ns()
             stuck = self.motion is not None and self.motion.stuck
             drive_ok = float(self.battery[1])
             us.write((time.monotonic_ns(), cm if cm is not None else -1.0, float(stuck), drive_ok))
             fails = 0 if cm is not None else fails + 1
-            # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける。
-            # explore では -1 が「前が遠くまで空いている」の意味にもなるので、あけすぎない
+            # 何度も測れなければ（つながっていない・前に何も無い）間隔をあける。stuck・drive_ok を
+            # 遅らせないよう、explore では 0.2 s ごとに書く
             retry = 0.2 if self.current_mode() == "explore" else self.cfg.car.ultrasonic_retry_s
             wait = period if fails < 20 else retry
-            # 長く待つ間に explore に替わったら、すぐ測り直す（古いままだと explore は前に進まない）
+            # 長く待つ間に explore に替わったら、すぐ測り直す
             while not self.stop.is_set():
                 left = wait - (time.monotonic() - t0)
                 if left <= 0 or (wait > 0.2 and self.current_mode() == "explore"):

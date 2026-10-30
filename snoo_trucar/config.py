@@ -88,8 +88,6 @@ class ControlConfig:
     distance_deadband_cm: float = 15.0
     # 箱の高さ（画面比）から距離を出す係数: d = k / h。猫の高さ 25 cm、vfov 41.4° でおよそ 33
     distance_k: float = 33.0
-    # 超音波がこの距離より近ければ前に進まない
-    stop_distance_cm: float = 20.0
     # 速さ（picarx の -100..100）。picarx は 0 以外の速さ s を PWM のデューティ 50 + s/2 % にする（30 → 65 %）。
     # TT モーター（1:48、約 200 rpm）と後輪（径 約 6.5 cm）から、100 で 0.6〜0.7 m/s、30 で 0.3〜0.4 m/s くらい（実測していない）。
     # 室内で、超音波が使えないときも、見てから止まるまで（遅れ 0.1 s）に 10 cm ほどで済む速さにしている
@@ -124,23 +122,22 @@ class ControlConfig:
     search_pan_deg: float = 35.0
     search_period_s: float = 6.0
     search_tilt_deg: float = 0.0
-    # explore（部屋を動きながら撮る）。止まって撮る → explore_step_cm 進む、を繰り返す。
-    # 超音波で前が explore_clear_cm より近ければ、explore_turn_s だけハンドルを切って下がる
+    # explore（部屋を動きながら撮る）。止まって撮る → home-linux の地図のサーバー（server.map_url）が決めた
+    # 1 歩を走る、を繰り返す。Pi では道を決めない（届かなければ送り直して待つ）
     explore_speed: float = 15.0
-    explore_step_cm: float = 40.0
-    explore_clear_cm: float = 50.0
-    explore_turn_s: float = 1.5
     explore_max_s: float = 600.0
     explore_snoo_near_cm: float = 150.0
-    # 次の 1 歩を home-linux の地図のサーバー（server.map_url）に決めてもらう。届かなければ Pi だけで決める
-    explore_server: bool = True
-    # サーバーの 1 歩で、超音波がこれより近ければ止める。地図が障害物を避けた道を出すので、Pi だけで決めるとき
-    # （explore_clear_cm）より近くまで行く。clear_cm の 25 cm + 止まるまでの分
-    explore_step_stop_cm: float = 30.0
-    # サーバーの前向きの 1 歩の上限（区切りを合わせて）。地図で見えている床が続けば、最後のまっすぐは 60 cm まで来る
-    # （long_step）。止まる決まり（超音波・clear_cm・画像が動かない）はそのまま
+    # 止まって撮る向き：チルトの段と、段ごとのパン（段ごとに折り返して撮る）。パンは car.pan_min..pan_max に
+    # 収める。広く撮る案（tilt 0 で -70..70、-15 で -35..35）は、首の台が当たらないか実物で確かめてから、
+    # pan_min・pan_max と一緒に変える
+    explore_scan_tilts: list = field(default_factory=lambda: [-15.0, 0.0])
+    explore_scan_pans: list = field(
+        default_factory=lambda: [[-30.0, -15.0, 0.0, 15.0, 30.0], [-30.0, -15.0, 0.0, 15.0, 30.0]]
+    )
+    # サーバーの前向きの区切りの合計の上限。地図で見えている床が続けば、最後のまっすぐは 60 cm まで来る
+    # （long_step）。止まる決まり（clear_cm・画像が動かない・guard・電池）はそのまま
     explore_server_step_cm: float = 80.0
-    # サーバーの下がる 1 歩の上限（後ろは見えない）
+    # サーバーの下がる区切りの合計の上限（後ろは見えない）
     explore_reverse_max_cm: float = 30.0
     # サーバーが画像から出す通り道の空き（clear_cm）がこれより近ければ、進むのをやめて向きを変える。
     # 止まるまでの距離（未測定）+ 余裕 15 cm
@@ -198,9 +195,20 @@ class Config:
     trace_dir: str = ""
 
 
+# 前の版にあった項目。Pi の config.toml に残っていても止めずに無視する（超音波で止まる・Pi だけで探る
+# 決まりを消した。2026-10-31）
+REMOVED = {
+    "control.stop_distance_cm", "control.explore_step_cm", "control.explore_clear_cm",
+    "control.explore_turn_s", "control.explore_server", "control.explore_step_stop_cm",
+}  # fmt: skip
+
+
 def _merge(obj, values: dict, where: str):
     names = {f.name: f for f in dataclasses.fields(obj)}
     for key, value in values.items():
+        if f"{where}{key}" in REMOVED:
+            print(f"設定の {where}{key} は使わなくなったので無視する", flush=True)
+            continue
         if key not in names:
             raise ValueError(f"設定に無い項目: {where}{key}")
         current = getattr(obj, key)
