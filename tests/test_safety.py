@@ -177,6 +177,45 @@ def test_no_echo_is_far_only_just_after_a_real_reading():
     assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "ultrasonic"
 
 
+def test_server_step_with_clear_ignores_missing_ultrasonic():
+    """clear_cm が来ている 1 歩では、超音波の -1・古い値は情報なしで、止まる理由にしない"""
+    from snoo_trucar.controller import CLEAR_STALE, CLEAR_VALUE
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    assert _server_step(c, k).speed > 0
+    for _ in range(20):  # 2 s ずっと -1（clear は撮るたびに来る）
+        c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+        x = k.run(0.1, us=None)
+    assert x.speed > 0 and c._ex_phase == "step"
+    c.us_stale = True
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    assert k.run(0.1, us=None).speed > 0
+    # 前を見ているカメラが途切れたら、0.3 s で止まる
+    c.set_clear(CLEAR_STALE, -1.0, k.t)
+    x = k.run(0.4, us=None)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear_unknown"
+
+
+def test_server_step_stops_only_on_repeated_near_ultrasonic():
+    """近い超音波 1 回（15 Hz で 67 ms）では止まらず、0.1 s（2 回）続けば止まる。-1 で数え直す"""
+    from snoo_trucar.controller import CLEAR_VALUE
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    _server_step(c, k)
+    near = ctl.explore_step_stop_cm - 5
+    for _ in range(3):
+        c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+        assert k.run(0.07, us=near).speed > 0  # 外れ値 1 回
+        assert k.run(0.07, us=None).speed > 0
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    x = k.run(0.14, us=near)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "ultrasonic"
+
+
 def test_control_proc_marks_old_ultrasonic_as_stale():
     from snoo_trucar.control_proc import US_MAX_AGE_NS, us_is_stale
 

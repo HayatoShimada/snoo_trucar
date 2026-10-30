@@ -66,6 +66,11 @@ def scan_schedule(pan0: float, tilt0: float) -> list[float]:
 # 60 s では、間に置かれた物を見落としたまま長く走れた（snoo_trucar#21 の B）。今は 1 s。
 # 測った値が古い（us_stale: スレッドが止まった・読めない）のは -1 と違い、いつも分からない（進まない）
 EXPLORE_US_TRUST_S = 1.0
+# サーバーの 1 歩では、前を見るのはカメラの clear_cm と guard。超音波は止まる理由の一つでしかない。
+# 超音波はよく -1 を返し、外れ値も出るので、-1・None・古い値は「情報なし」として止めない。
+# 止めるのは、測れた近い値が US_NEAR_STOP_NS 続いたとき（15 Hz で 2 回続けて近い）だけ。
+# EXPLORE_US_TRUST_S だけでは、超音波がほぼ -1 の探索で、1 歩がみな 0 cm で止まっていた
+US_NEAR_STOP_NS = 100_000_000
 EXPLORE_FAR_CM = 300.0
 EXPLORE_CHECK_S = 0.3  # 切り返しのあと、止まって超音波を測り直す時間
 EXPLORE_MAX_TURNS = 8  # 切り返しをこれだけしても前が空かなければ、その場で撮り直す
@@ -142,6 +147,7 @@ class Controller:
         self._ex_moved = 0.0
         self._ex_turn_dir = 1.0
         self._ex_us_at = -1e9
+        self._us_near_since: int | None = None  # 測れた超音波が近くなった時刻
         self._ex_turns = 0
         self.stuck = False  # 走らせているのに画像が動かない（メインプロセスの motion.py が見る）
         self.us_stale = False  # 超音波の新しい値（-1 を含む）が来ていない。control_proc が入れる
@@ -228,6 +234,7 @@ class Controller:
         self._ex_moved = 0.0
         self._ex_turns = 0
         self._ex_us_at = -1e9  # _ex_total で数えるので、始め直したら前の時刻は使えない
+        self._us_near_since = None
         self.station_wait = -1
         self.plan = None
         self.last_step = (0.0, 0)
@@ -421,6 +428,10 @@ class Controller:
             return 0.0, 0.0, 0.0, 0.0
         self._ex_t += dt
         us_real = us_cm  # 実際に測れた値（-1 を遠いとみなす前）
+        if us_real is None or us_real >= ctl.explore_step_stop_cm:
+            self._us_near_since = None
+        elif self._us_near_since is None:
+            self._us_near_since = self._now_ns
         if us_cm is not None:
             self._ex_us_at = self._ex_total
         elif not self.us_stale and self._ex_total - self._ex_us_at <= EXPLORE_US_TRUST_S:
@@ -493,10 +504,14 @@ class Controller:
                 self._skip_moved = 0.0
             # clear_skip の間は画像で前を見ていない。超音波が遠くまで空いていなければ遅く・短く
             skip_capped = skip and not (us_real is not None and us_real > CLEAR_SKIP_US_OK_CM)
+            us_near = (self._us_near_since is not None
+                       and self._now_ns - self._us_near_since >= US_NEAR_STOP_NS)  # fmt: skip
+            us_unsure = us_cm is None or us_cm < ctl.explore_step_stop_cm
             reason = None
             if self.stuck:
                 reason, self.stuck = "stuck", False
-            elif fwd and (us_cm is None or us_cm < ctl.explore_step_stop_cm):
+            elif fwd and (us_near or (self.clear_state == CLEAR_ABSENT and us_unsure)):
+                # clear_cm を出さないサーバーでは、前を見るのは超音波だけ。分からなければ止まる
                 reason = "ultrasonic"
             elif fwd and blocked == "near" and self._low_left <= 0:
                 low = us_real is not None and us_real >= self.clear_cm + LOW_OBSTACLE_GAP_CM
