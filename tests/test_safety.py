@@ -771,3 +771,28 @@ def test_explore_still_stops_and_watches_a_near_snoo():
     _see(est, S, 100.0)
     x = c.step(est, S, DT, 200.0)
     assert x.state == TRACK and x.speed == 0 and c.mode == "explore"
+
+
+def test_server_step_starts_while_waiting_for_the_first_clear():
+    """1 歩を始めた瞬間は clear の欄がまだ無い（止まっていたフレームの返事）。超音波が -1 でも
+    すぐには止めず、clear_skip（走り出した直後）が来ればそのまま進む。来なければ 0.5 s で止まる"""
+    from snoo_trucar.controller import CLEAR_ABSENT, CLEAR_ABSENT_GRACE_S, CLEAR_SKIP
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(CLEAR_ABSENT, -1.0, k.t)
+    # 超音波は始めからずっと -1（23:10 の探索と同じ。測れた値を信じる 1 s も使えない）
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan((0, PLAN_MOVE, 12.0, 1, 0.0, 80.0, 0, 0, 0, 0))
+    assert k.run(DT, us=None).speed > 0
+    assert k.run(0.1, us=None).speed > 0  # 欄が無いまま 0.1 s
+    c.set_clear(CLEAR_SKIP, -1.0, k.t)  # 走り出したフレームの返事（settling）
+    assert k.run(0.2, us=None).speed > 0
+    # clear を返さないサーバー：0.5 s 待っても欄が無ければ、今までどおり超音波で止まる
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    c2.set_clear(CLEAR_ABSENT, -1.0, k2.t)
+    _server_step(c2, k2)
+    # 始めに測れた超音波（200 cm）を信じる 1 s（EXPLORE_US_TRUST_S）も過ぎたら止まる
+    x = k2.run(max(CLEAR_ABSENT_GRACE_S, 1.0) + 0.2, us=None)
+    assert x.speed == 0 and STOP_REASONS[c2.last_step[1]] == "ultrasonic"
