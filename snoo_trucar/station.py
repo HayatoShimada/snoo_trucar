@@ -66,7 +66,7 @@ def plan_row(k: int, segs, speed: float, back_speed: float) -> tuple:
 
 
 class StationClient:
-    def __init__(self, runner, plan_buf):
+    def __init__(self, runner, plan_buf, explore_state=None):
         self.runner = runner
         self.plan_buf = plan_buf
         self.cfg = runner.cfg
@@ -85,6 +85,9 @@ class StationClient:
         self._reshoots: dict[int, int] = {}  # station ごとの撮り直した回数
         # 撮り直させた station。制御プロセスが撮り始める（待つのをやめる）まで送らない
         self._reshoot_k = -1
+        # explore の続きを書く所（resume.ExploreState）。explore をやめたら消す
+        self.explore_state = explore_state
+        self._was_explore = False
 
     def run(self, stop: threading.Event) -> None:
         errors = ErrorLog("station")
@@ -98,6 +101,8 @@ class StationClient:
     def _once(self) -> None:
         v = self.runner.last_cmd
         rec = self.runner.recorder
+        if v is not None and self.explore_state is not None:
+            self._note_state(v, rec)
         if v is not None and rec is not None and rec.dir is not None:
             if self._session != rec.dir.name:
                 self._session, self._posted, self._moves = rec.dir.name, -1, {}
@@ -126,6 +131,21 @@ class StationClient:
                 elif not ok:
                     # 届かない・失敗：制御プロセスは待ち続けるので、少しして同じ station を送り直す
                     self._posted, self._retry_at = -1, time.monotonic() + RETRY_S
+
+    def _note_state(self, v, rec) -> None:
+        """explore の今を explore.json に書く（起動し直したら続きから）。explore をやめたら消す"""
+        from .controller import MODES
+        from .resume import phase_of
+
+        explore = MODES[int(v[14])] == "explore"
+        if self._was_explore and not explore:
+            self.explore_state.clear()  # 調べ終えた・時間切れ・ボタン
+        self._was_explore = explore
+        if explore and rec is not None and rec.dir is not None:
+            phase = phase_of(v)
+            # 返事を待っている station はまだ終わっていない（戻ったら撮り直して送る）
+            nxt = int(v[18]) if phase == "plan" else int(v[21])
+            self.explore_state.write(rec.dir.name, nxt, phase)
 
     def _can_reshoot(self, k: int) -> bool:
         return self._reshoots.get(k, 0) < MAX_RESHOOTS

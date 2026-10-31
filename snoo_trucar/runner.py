@@ -52,7 +52,7 @@ def battery_state(volts: float | None, low_v: float) -> tuple[str, bool]:
 class Runner:
     def __init__(self, cfg: Config, sim: bool = False, seconds: float | None = None,
                  quiet: bool = False, seed: int = 0, buttons: bool = True,
-                 camera_file: str | None = None):  # fmt: skip
+                 camera_file: str | None = None, resume: bool = False):  # fmt: skip
         self.cfg = cfg
         self.sim = sim
         self.seconds = seconds
@@ -77,6 +77,21 @@ class Runner:
         self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
+        # explore の続き（resume.py）。resume なら、起動したときに explore.json を見て戻る
+        from .resume import ExploreState
+
+        state = cfg.explore_state
+        self.explore_state = ExploreState(Path(state).expanduser() if state and not sim else None)
+        self.resume = self.explore_state.load() if resume else None
+        self.resume_elapsed = 0.0
+        if self.resume is not None:
+            self.resume_elapsed = max(0.0, time.time() - self.explore_state.started)
+            if self.resume_elapsed >= cfg.control.explore_max_s:
+                print("explore の続きは explore_max_s を過ぎているので戻らない", flush=True)
+                self.resume = None
+                self.explore_state.clear()
+            else:
+                cfg.control.mode = "explore"
 
     def run(self) -> None:
         cfg = self.cfg
@@ -86,7 +101,13 @@ class Runner:
         self.mode_buf = mode = SeqBuffer(control_proc.MODE_N)
         clear = SeqBuffer(control_proc.CLEAR_N)
         plan = SeqBuffer(control_proc.PLAN_N)
-        self.set_mode(cfg.control.mode)
+        if self.resume is not None:
+            r, elapsed = self.resume, self.resume_elapsed
+            print(f"explore の続き: {r['session_id']} の station {r['next_station']} から"
+                  f"（{elapsed:.0f} 秒探った後）。まずその場で撮る", flush=True)  # fmt: skip
+            self.mode_buf.write((MODES.index("explore"), int(r["next_station"]), elapsed))
+        else:
+            self.set_mode(cfg.control.mode)
         ctx = mp.get_context("fork")
         proc_stop = ctx.Event()
         proc = ctx.Process(
@@ -150,6 +171,8 @@ class Runner:
 
             self.link.on_clear = on_clear
             recorder = self.recorder = MapRecorder(Path(cfg.map_dir).expanduser())
+            if self.resume is not None:
+                recorder.resume(self.resume["session_id"])
 
             from .motion import MotionWatch, shrink
 
@@ -170,7 +193,7 @@ class Runner:
             threads.append(self._thread("カメラ", camera_loop, camera, self.link, self.stop, on_frame))
             from .station import StationClient
 
-            self.station = StationClient(self, plan)
+            self.station = StationClient(self, plan, self.explore_state)
             threads.append(self._thread("station", self.station.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
@@ -221,7 +244,10 @@ class Runner:
             self.thread_died = name
 
     def set_mode(self, mode: str) -> None:
-        self.mode_buf.write((MODES.index(mode),))
+        if mode != "explore":
+            # USR の長押しなどで explore をやめた。起動し直しても戻らない
+            self.explore_state.clear()
+        self.mode_buf.write((MODES.index(mode), -1.0, 0.0))
 
     def current_mode(self) -> str:
         return MODES[int(self.last_cmd[14])] if self.last_cmd is not None else self.cfg.control.mode

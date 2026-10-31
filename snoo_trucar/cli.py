@@ -5,6 +5,7 @@
   probe        画像を 1 枚サーバーに送って返事を見る
   panorama     map で撮った画像を 1 枚のパノラマにする
   stop         モーターだけを止める（systemd の ExecStopPost。run が動いていなくても使える）
+  wait-scan    explore を止めずに入れ替えられる時（撮っている間）まで待つ
 """
 
 from __future__ import annotations
@@ -39,8 +40,9 @@ def _run(args) -> int:
     from .runner import ControlDied, ThreadDied
 
     try:
+        # --mode を決めずに起動したら、10 分以内の explore の続きに戻る（resume.py）
         Runner(cfg, sim=args.sim, seconds=args.seconds, buttons=not args.no_buttons,
-               camera_file=args.camera_file).run()
+               camera_file=args.camera_file, resume=not args.mode).run()
     except KeyboardInterrupt:
         pass
     except (ControlDied, ThreadDied) as e:
@@ -59,6 +61,40 @@ def _stop(args) -> int:
         return 1
     print("モーターを止めた", flush=True)
     return 0
+
+
+def _wait_scan(args) -> int:
+    """explore の間なら、撮っている（scan）間になるまで待つ。走っている・返事を待っている間に
+    起動し直すと、走った 1 歩が分からなくなる。地図のサーバーが返事を作っている間（busy）も待つ。
+    explore でなければすぐ 0。待ちきれなければ 1"""
+    from .resume import ExploreState
+
+    cfg = config_mod.load(args.config)
+    path = Path(cfg.explore_state).expanduser() if cfg.explore_state else None
+    end = time.monotonic() + args.timeout
+    busy_url = cfg.server.map_url.split("/v1/")[0] + "/v1/snoo/map/busy"
+    while time.monotonic() < end:
+        st = ExploreState(path).load()
+        if st is None:
+            print("explore ではない（続きが無い）", flush=True)
+            return 0
+        if st.get("phase") == "scan" and _map_idle(busy_url):
+            print(f"撮っている（station {st['next_station']}）。今なら入れ替えてよい", flush=True)
+            return 0
+        time.sleep(0.2)
+    print(f"{args.timeout:.0f} 秒待っても撮っている間にならなかった", flush=True)
+    return 1
+
+
+def _map_idle(url: str) -> bool:
+    """地図のサーバーが返事を作っていない（in_flight 0）。聞けなければ見ない
+    （Pi の段階だけで決める）"""
+    try:
+        import requests
+
+        return int(requests.get(url, timeout=1.0).json().get("in_flight", 0)) == 0
+    except Exception:
+        return True
 
 
 def _fake_server(args) -> None:
@@ -156,6 +192,10 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("stop", help="モーターだけを止める（run が動いていなくても）")
     s.set_defaults(func=_stop)
+
+    w = sub.add_parser("wait-scan", help="入れ替えてよい時（explore で撮っている間）まで待つ")
+    w.add_argument("--timeout", type=float, default=120.0)
+    w.set_defaults(func=_wait_scan)
 
     args = p.parse_args(argv)
     return args.func(args)

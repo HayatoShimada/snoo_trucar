@@ -32,6 +32,7 @@ class MapRecorder:
         self.last_offer_ns = 0
         self.missed: list[int] = []
         self.write_errors = 0
+        self._resume: str | None = None  # 次に撮り始めるとき、このセッションの置き場に続けて足す
 
     def offer(self, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm: float | None) -> None:
         """カメラの 1 フレームごとに呼ぶ。cmd は制御プロセスの出力（control_proc.CMD_N）"""
@@ -47,11 +48,14 @@ class MapRecorder:
             return  # snoo を見ている間などは撮らない（探索は続いている）
         if self.dir is None:
             self.mode = mode
-            self.dir = self.root / time.strftime(f"{mode}_%Y%m%d_%H%M%S")
+            name, self._resume = (self._resume if mode == "explore" else None), None
+            self.dir = self.root / (name or time.strftime(f"{mode}_%Y%m%d_%H%M%S"))
             self.dir.mkdir(parents=True, exist_ok=True)
             self.entries, self._saved = [], set()
             self.missed, self.write_errors = [], 0
-            print(f"マッピング開始: {self.dir}", flush=True)
+            if name:
+                self._load_entries()
+            print(f"マッピング{'の続き' if name else '開始'}: {self.dir}", flush=True)
         now = time.monotonic()
         if index == DRIVE_INDEX:
             self._index = index
@@ -80,6 +84,30 @@ class MapRecorder:
         if self._save(f"{index:02d}", t_ns, jpeg, cmd, ultrasonic_cm, moving=False):
             self._saved.add(index)
 
+    def resume(self, session_id: str) -> None:
+        """起動し直した後、explore の同じセッション（置き場の名前）に続けて撮る（resume.py）"""
+        self._resume = session_id
+
+    def _load_entries(self) -> None:
+        """前のプロセスが frames.jsonl に足した分を読む。scan.json に全部を残し、走っている間の
+        画像の名前（d00001…）を上書きしないため"""
+        try:
+            lines = (self.dir / "frames.jsonl").read_text().splitlines()
+        except FileNotFoundError:
+            return
+        by_file = {}
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue  # 書いている途中で落ちた行
+            by_file.pop(e.get("file"), None)
+            by_file[e.get("file")] = e  # 撮り直した画像は後の行
+        self.entries = list(by_file.values())
+        names = [str(e.get("file", "")) for e in self.entries]
+        drives = [int(n[1:6]) for n in names if n.startswith("d") and n[1:6].isdigit()]
+        self._drive_n = max(drives, default=0)
+
     def _save(self, stem: str, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm, moving: bool) -> bool:
         pan, tilt = float(cmd[3]), float(cmd[4])
         name = f"{stem}_pan{pan:+04.0f}_tilt{tilt:+03.0f}.jpg"
@@ -92,6 +120,9 @@ class MapRecorder:
             return False
         entry = {"file": name, "t_capture_ns": t_ns, "pan_deg": pan, "tilt_deg": tilt,
                  "ultrasonic_cm": ultrasonic_cm}  # fmt: skip
+        if not moving:
+            # 同じ向きを撮り直した（起動し直して同じ station を撮った）。同じ名前を 2 つ送らない
+            self.entries = [e for e in self.entries if e.get("file") != name]
         if self.mode == "explore":
             # 自分の動きの手がかり（指令。車輪の回転計は無い）。station は撮った場所の番号
             # （走っている間の分は、着いた先の station に入れる。control_proc の ex_station）

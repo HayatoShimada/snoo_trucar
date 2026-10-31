@@ -22,8 +22,9 @@ MEAS_N = 7
 # us: t_ns, cm（測れないとき -1。snoo の距離の推定にだけ使う）, stuck（走らせているのに画像が動かない。
 #     motion.py）, drive_ok（電池が足りていて、メインプロセスが速さを書いている。進んだ距離を数えるため）
 US_N = 4
-# mode: controller.MODES の番号
-MODE_N = 1
+# mode: controller.MODES の番号, 続きから始める station（-1 は始めから）,
+#       前のプロセスで探った秒（resume.py）
+MODE_N = 3
 # cmd: t_ns, steer, speed, pan, tilt, state, valid, bearing, dist, since_seen,
 #      loop_hz, jitter_p99_us, overruns, scan_index, mode,
 #      meas_t_capture（最後に使った検出の撮った時刻）, meas_used_ns（それで推定を更新した時刻）,
@@ -116,6 +117,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             if r is not None and r[0] != last_mode:
                 last_mode = r[0]
                 controller.set_mode(MODES[int(r[1][0])])
+                if MODES[int(r[1][0])] == "explore" and r[1][1] >= 0:
+                    controller.resume_explore(int(r[1][1]), float(r[1][2]))
 
             est.predict_to(now)
             r = meas.read()

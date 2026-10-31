@@ -222,6 +222,15 @@ class Controller:
             self._arc_left = 0.0
             self._reset_explore()
 
+    def resume_explore(self, station: int, elapsed_s: float = 0.0) -> None:
+        """起動し直した後、同じセッションの続き（station 番号）から explore を始める（resume.py）。
+        まずその場で撮る。直前の 1 歩は分からないので、prev_step は無し（step_station = -1）。
+        elapsed_s は前のプロセスで探った時間（explore_max_s を延ばさない）"""
+        self.set_mode("explore")
+        self._reset_explore()
+        self._ex_stop = max(0, int(station))
+        self._ex_total = max(0.0, float(elapsed_s))
+
     def _reset_explore(self) -> None:
         """explore の状態をすべて始めに戻す。前の explore の 1 歩・待っている station・撮る予定が
         残っていると、次の explore の station 0 で、サーバーに聞かずに前の 1 歩を走ってしまう"""

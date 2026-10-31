@@ -193,6 +193,9 @@ class Config:
     seen_dir: str = "~/captures/snoo_seen"  # 追い始めたときの画像と箱
     # フレームごとの区間の時刻（trace.py）を JSON Lines で残すディレクトリ。空なら残さない（集計は出す）
     trace_dir: str = ""
+    # explore の続き（resume.py）。起動し直したとき、これが 10 分より新しければ
+    # 同じセッションで続ける。空なら使わない
+    explore_state: str = "~/.local/state/snoo_trucar/explore.json"
 
 
 # 前の版にあった項目。Pi の config.toml に残っていても止めずに無視する（超音波で止まる・Pi だけで探る

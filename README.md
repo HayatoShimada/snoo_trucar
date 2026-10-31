@@ -16,6 +16,13 @@ Robot HAT の USR ボタンで行動を選ぶ。LED の点滅の回数が今の�
 | 長押し（1.5 秒） | idle | 止まって待つ（LED は 2 秒に 1 回短く光る） |
 
 RST ボタンは Robot HAT のマイコンのリセットなので使わない。
+
+explore の間は `~/.local/state/snoo_trucar/explore.json` に session_id・次の station・今の段階を書く。
+`--mode` を決めずに起動し直したとき、それが 10 分以内なら同じセッションの続きの station から explore に戻る
+（まずその場で首を振って撮り、`prev_step` は null。走るのはサーバーの返事が来てから）。explore をやめたら
+（長押し・調べ終えた・時間切れ）消す。コードを入れ替えるときは、撮っている間に起動し直す：
+`.venv/bin/python -m snoo_trucar wait-scan && systemctl --user restart snoo-trucar`（地図のサーバーの
+`/v1/snoo/map/busy` も見る。explore でなければすぐ通る）
 コマンドで追いかける行動（follow、50 cm まで近づき、下がらない）も選べる。
 
 ```sh
