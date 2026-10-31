@@ -152,8 +152,9 @@ def test_click_counter():
     assert run([(0.1, 0.2), (0.4, 0.5)]) == ["click:2"]
     assert run([(0.1, 0.2), (0.4, 0.5), (0.7, 0.8)]) == ["click:3"]
     assert run([(0.1, 2.0)]) == ["long"]
-    assert [event_to_mode(e) for e in ("click:1", "click:2", "click:3", "long", "click:5")] == [
-        "watch", "keep", "map", "idle", None,
+    assert [event_to_mode(e) for e in ("click:1", "click:2", "click:3", "long", "click:5",
+                                       "click:9")] == [
+        "watch", "keep", "map", "idle", "agent", None,
     ]  # fmt: skip
 
 

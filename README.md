@@ -13,6 +13,7 @@ Robot HAT の USR ボタンで行動を選ぶ。LED の点滅の回数が今の�
 | 2 回 | keep | 距離を保つ。遠ければ近づき、近すぎれば下がる（`keep_distance_cm`、既定 80 cm） |
 | 3 回 | map | 部屋を撮る。その場でカメラを 8 方向 × 2 段に向けて 1 枚ずつ撮り、`~/captures/snoo_map/map_日時/` に画像と `scan.json`（向き・超音波）を置く。一巡したら待機に戻る。地図を組み立てるのは home-linux |
 | 4 回 | explore | 部屋を動きながら撮る。止まって首を振って撮る（既定 5 方向 × 2 段。`[control] explore_scan_tilts`・`explore_scan_pans` で変えられる）→ home-linux の地図のサーバーに送り、返ってきた 1 歩（区切りごとに前・後ろ、5 つまで）をそのとおり走る（その間も 5 fps で撮る）、を繰り返す。道はサーバーが決め、Pi は決めない（届かなければ 3 秒おきに送り直して待つ）。前へ走る区切りは clear_cm（カメラ）・guard・画像が動かない・電池・USR で止まる。超音波では止まらない（地図の弱い証拠として送るだけ）。`~/captures/snoo_map/explore_日時/` に画像と `scan.json`（向き・指令・超音波）。snoo が 150 cm より近くに見えたら止まって見守る。10 分で待機に戻る |
+| 5 回 | agent | エージェント（Claude Code など）の指令を実行する（`snoo_trucar/agent.py`、仕様は rocm_opencv_server の `docs/agent_robot.md`）。地図のサーバーの `commands/next` を 0.5 秒ごとに問い合わせ（どのモードでも。実行するのは agent のときだけ）、look・move・scan・stop を実行して結果を返す。自分では走らない。move は 30 cm・速さ 10・ハンドル ±30° まで、explore の 1 歩と同じ止め方（clear_cm・画像が動かない）に、guard・snoo が 150 cm より近い・電池・時間切れ・問い合わせが 3 秒通らない（heartbeat）を足す。scan は `agent_日時` のセッションの station として送り、返ってきた 1 歩は走らない |
 | 長押し（1.5 秒） | idle | 止まって待つ（LED は 2 秒に 1 回短く光る） |
 
 RST ボタンは Robot HAT のマイコンのリセットなので使わない。

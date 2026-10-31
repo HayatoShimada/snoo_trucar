@@ -62,6 +62,8 @@ class ServerConfig:
     # 探索の地図のサーバー（撮った分を送ると、次の 1 歩を返す。docs/PROTOCOL.md）
     map_url: str = "http://192.168.0.248:8720/v1/snoo/map/station"
     map_timeout_s: float = 20.0
+    # エージェントの指令を地図のサーバー（map_url と同じ所）に 0.5 秒ごとに問い合わせる（agent.py）
+    agent_poll: bool = True
 
 
 @dataclass

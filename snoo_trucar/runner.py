@@ -75,6 +75,7 @@ class Runner:
         self.recorder = None
         self.station = None
         self.voice = None  # 声（voice.py。実機のときだけ）
+        self.agent = None  # エージェントの指令（agent.py。実機のときだけ）
         self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
@@ -102,6 +103,7 @@ class Runner:
         self.mode_buf = mode = SeqBuffer(control_proc.MODE_N)
         clear = SeqBuffer(control_proc.CLEAR_N)
         plan = SeqBuffer(control_proc.PLAN_N)
+        agent = SeqBuffer(control_proc.AGENT_N)
         if self.resume is not None:
             r, elapsed = self.resume, self.resume_elapsed
             print(f"explore の続き: {r['session_id']} の station {r['next_station']} から"
@@ -113,7 +115,8 @@ class Runner:
         proc_stop = ctx.Event()
         proc = ctx.Process(
             target=control_proc.run,
-            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name),
+            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name,
+                  agent.name),
             name="snoo-control",
             daemon=True,
         )
@@ -201,10 +204,17 @@ class Runner:
 
                 self.voice = Voice(self, cfg.voice, base_url(cfg.server.map_url))
                 threads.append(self._thread("声", self.voice.run, self.stop))
+            if cfg.server.agent_poll:
+                from .agent import SUPPORTS, AgentClient
+                from .voice import base_url
+
+                supports = SUPPORTS + (["say"] if cfg.voice.enabled else [])
+                self.agent = AgentClient(self, agent, base_url(cfg.server.map_url), supports)
+                threads.append(self._thread("agent", self.agent.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
 
-                panel = Panel(self.set_mode, self.current_mode)
+                panel = Panel(self.button_mode, self.current_mode)
                 threads.append(self._thread("ボタン", panel.run, self.stop))
         threads.append(self._thread("超音波", self._ultrasonic_loop, car, us))
         threads.append(self._thread("電池", self._battery_loop, car))
@@ -232,7 +242,7 @@ class Runner:
                 self.link.close()
             if self.trace is not None:
                 self.trace.close()
-            for b in (meas, us, cmd, mode, clear, plan):
+            for b in (meas, us, cmd, mode, clear, plan, agent):
                 b.close()
 
     def _thread(self, name: str, target, *args) -> threading.Thread:
@@ -254,6 +264,12 @@ class Runner:
             # USR の長押しなどで explore をやめた。起動し直しても戻らない
             self.explore_state.clear()
         self.mode_buf.write((MODES.index(mode), -1.0, 0.0))
+
+    def button_mode(self, mode: str) -> None:
+        """USR ボタン。長押し（idle）は、agent の指令も取り消す"""
+        self.set_mode(mode)
+        if mode == "idle" and self.agent is not None:
+            self.agent.on_button()
 
     def current_mode(self) -> str:
         return MODES[int(self.last_cmd[14])] if self.last_cmd is not None else self.cfg.control.mode
@@ -396,6 +412,8 @@ class Runner:
             s += f" | 画像の動き={m.diff:.1f}（止まっているとき {m.noise:.1f}）" + (" 詰まった" if m.stuck else "")
         if self.station is not None and MODES[int(v[14])] == "explore" and self.station.last:
             s += f" | {self.station.last}"
+        if self.agent is not None and MODES[int(v[14])] == "agent" and self.agent.last:
+            s += f" | {self.agent.last}"
         if int(v[17]) != OK:
             s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"

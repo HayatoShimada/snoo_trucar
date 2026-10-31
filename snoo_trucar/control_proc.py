@@ -32,8 +32,15 @@ MODE_N = 3
 #      station_wait（サーバーの返事を待っている station、-1 で待っていない）, last_step_s, last_step_reason,
 #      ex_station（explore で今の station。走っている間は次の station）, low_passed（直前の 1 歩で低い物を越えた回数）,
 #      step_station（直前の 1 歩はどの station の返事か。-1 は走っていない）, step_speed（前へ使った速さ）,
-#      step_driven_cm（実際に書いた速さで数えた距離）, 区切りごとの距離 × controller.MAX_SEGMENTS
-CMD_N = 26 + MAX_SEGMENTS
+#      step_driven_cm（実際に書いた速さで数えた距離）, 区切りごとの距離 × controller.MAX_SEGMENTS,
+#      agent の指令の id・様子（controller.AS_*）・止めた理由（controller.AGENT_REASONS の番号）・
+#      走った cm・かかった秒
+CMD_N = 26 + MAX_SEGMENTS + 5
+C_AGENT_ID = 26 + MAX_SEGMENTS  # cmd の中の agent の欄の始め（id, 様子, 理由, cm, 秒）
+# agent: 問い合わせが通った時刻（monotonic_ns）, 指令の id, 種類（controller.A_*）, a, b, c, d
+#        （look: パン・チルト（無ければ nan）、move: ハンドル・cm・速さ・後ろへ。
+#        controller.set_agent）
+AGENT_N = 7
 # clear: t_capture_ns, cm, state（controller.CLEAR_*。0: 返事に欄が無い / 1: 値がある / 2: null /
 #        3: clear_skip。protocol.Reply）
 CLEAR_N = 3
@@ -51,7 +58,8 @@ def us_is_stale(now_ns: int, us_t_ns: int) -> bool:
 
 
 def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str,
-        stop_event, clear_name: str | None = None, plan_name: str | None = None) -> None:  # fmt: skip
+        stop_event, clear_name: str | None = None, plan_name: str | None = None,
+        agent_name: str | None = None) -> None:  # fmt: skip
     ctl = cfg.control
     if ctl.cpu >= 0:
         try:
@@ -64,6 +72,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
     last_clear = 0
     plan_buf = SeqBuffer(PLAN_N, plan_name) if plan_name else None
     last_plan = 0
+    agent_buf = SeqBuffer(AGENT_N, agent_name) if agent_name else None
+    last_agent = 0
     est = TargetEstimator(cfg.camera.hfov_deg, cfg.camera.vfov_deg, ctl.distance_k)
     controller = Controller(ctl, cfg.car)
     if clear_buf is not None:
@@ -113,6 +123,12 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                     last_plan = r[0]
                     controller.set_plan(r[1])
 
+            if agent_buf is not None:
+                r = agent_buf.read()
+                if r is not None and r[0] != last_agent:
+                    last_agent = r[0]
+                    controller.set_agent(r[1])
+
             r = mode_buf.read()
             if r is not None and r[0] != last_mode:
                 last_mode = r[0]
@@ -142,6 +158,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 controller.station_wait, *controller.last_step, controller._ex_stop, controller.low_passed,
                 controller.step_station, controller._ex_step[0], sum(controller.step_driven),
                 *controller.step_driven,
+                controller.agent_id, controller.agent_status, controller.agent_reason,
+                controller.agent_moved, controller.agent_secs,
             )  # fmt: skip
             out.write(out_vals)
 
@@ -172,4 +190,6 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             clear_buf.close()
         if plan_buf is not None:
             plan_buf.close()
+        if agent_buf is not None:
+            agent_buf.close()
         out.close()

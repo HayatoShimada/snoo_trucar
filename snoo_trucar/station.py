@@ -88,6 +88,8 @@ class StationClient:
         # explore の続きを書く所（resume.ExploreState）。explore をやめたら消す
         self.explore_state = explore_state
         self._was_explore = False
+        # station ごとの返事の action（agent の scan の結果に書く）
+        self.replies: dict[int, str] = {}
 
     def run(self, stop: threading.Event) -> None:
         errors = ErrorLog("station")
@@ -187,8 +189,14 @@ class StationClient:
                     d = link.recent_dets.get(e.get("t_capture_ns"))
                     if d is not None:
                         e["dets"] = d
+        from .controller import MODES
+
+        mode = MODES[int(v[14])] if len(v) > 14 else "explore"
+        agent = getattr(self.runner, "agent", None) if mode == "agent" else None
         prev = None
-        if k > 0:
+        if k > 0 and agent is not None:
+            prev = agent.prev_step()  # agent の move（サーバーの 1 歩は走っていない）
+        elif k > 0:
             secs, reason = float(v[19]), STOP_REASONS[int(v[20])]
             segs = self._moves.get(int(v[23])) if int(v[23]) >= 0 else None
             if segs is not None:
@@ -208,7 +216,8 @@ class StationClient:
                         "low_obstacle_passed": int(v[22])}  # fmt: skip
         us = self.runner.last_us
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
-                "mode": "explore", "frames": entries, "session_id": self._session, "station_id": k,
+                "mode": "agent" if agent is not None else "explore", "frames": entries,
+                "session_id": self._session, "station_id": k,
                 "prev_step": prev, "battery_v": self.runner.battery_v,
                 "ultrasonic_cm": us,
                 "camera_height_cm": self.cfg.camera.height_cm,
@@ -258,5 +267,8 @@ class StationClient:
             print(f"station {k}: 返事の前に explore が替わったので捨てる", flush=True)
             return True
         self.plan_buf.write(plan)
+        self.replies[k] = str(ans.get("action"))
+        if agent is not None:
+            agent.prev_step_sent()
         print(f"{self.last}（{len(entries)} 枚、{time.monotonic() - t0:.1f}s）", flush=True)
         return True

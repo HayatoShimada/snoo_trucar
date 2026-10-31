@@ -5,6 +5,7 @@ USR ボタン:
   2 回 → keep（距離を保つ。近づいたり離れたりする）
   3 回 → map（その場でカメラを振って部屋を撮る）
   4 回 → explore（部屋を動きながら撮る）
+  5 回 → agent（エージェントの指令を実行する。agent.py）
   長押し（1.5 秒）→ idle（止まって待つ）
 
 LED は今の行動を点滅の回数で出す（idle は 2 秒に 1 回短く光る）。
@@ -20,8 +21,9 @@ BUTTON_GPIO = 25
 LED_GPIO = 26
 CLICK_GAP_S = 0.6  # これだけ押されなければ、押した回数を確定する
 LONG_PRESS_S = 1.5
-CLICK_MODES = {1: "watch", 2: "keep", 3: "map", 4: "explore"}
-LED_BLINKS = {"watch": 1, "keep": 2, "map": 3, "explore": 4, "follow": 5}
+CLICK_MODES = {1: "watch", 2: "keep", 3: "map", 4: "explore", 5: "agent"}
+# follow はボタンでは選べない（コマンドだけ）
+LED_BLINKS = {"watch": 1, "keep": 2, "map": 3, "explore": 4, "agent": 5, "follow": 7}
 
 
 class ClickCounter:

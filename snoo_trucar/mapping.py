@@ -40,7 +40,7 @@ class MapRecorder:
 
         self.last_offer_ns = t_ns
         mode = MODES[int(cmd[14])] if cmd is not None else "idle"
-        if mode not in ("map", "explore"):
+        if mode not in ("map", "explore", "agent"):
             self.finish()
             return
         index = int(cmd[13])
@@ -70,7 +70,7 @@ class MapRecorder:
             if self._index >= 0 and self._index not in self._saved:
                 self.missed = self.missed[-99:] + [self._index]
             settle = SETTLE_S
-            if mode == "explore":
+            if mode in ("explore", "agent"):
                 # 向きの差に合わせて待つ（controller.scan_schedule と同じ）
                 from .controller import scan_settle_s
 
@@ -123,7 +123,7 @@ class MapRecorder:
         if not moving:
             # 同じ向きを撮り直した（起動し直して同じ station を撮った）。同じ名前を 2 つ送らない
             self.entries = [e for e in self.entries if e.get("file") != name]
-        if self.mode == "explore":
+        if self.mode in ("explore", "agent"):
             # 自分の動きの手がかり（指令。車輪の回転計は無い）。station は撮った場所の番号
             # （走っている間の分は、着いた先の station に入れる。control_proc の ex_station）
             entry.update(steer_deg=float(cmd[1]), speed=float(cmd[2]), moving=moving)
