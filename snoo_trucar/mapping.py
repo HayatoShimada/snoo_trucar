@@ -7,11 +7,15 @@ explore で走っている間（scan_index = DRIVE_INDEX）は DRIVE_FPS で撮�
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
 DRIVE_FPS = 5.0
 SETTLE_S = 1.2  # 向きを変えてから撮るまで待つ（サーボが止まり、ぶれが収まるまで）
+# clear.jsonl は開いたままにして、この間ごとに flush する（走っている間は最大 60 回/s 来る。
+# 1 行ごとに開いて閉じると SD に書く回数が多い。#21 のレビューの 7・I）
+CLEAR_FLUSH_S = 1.0
 
 
 class MapRecorder:
@@ -33,6 +37,10 @@ class MapRecorder:
         self.missed: list[int] = []
         self.write_errors = 0
         self._resume: str | None = None  # 次に撮り始めるとき、このセッションの置き場に続けて足す
+        self._clear_f = None  # clear.jsonl（受信のスレッドが書く）
+        self._clear_dir: Path | None = None
+        self._clear_flushed = 0.0
+        self._clear_lock = threading.Lock()
 
     def offer(self, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm: float | None) -> None:
         """カメラの 1 フレームごとに呼ぶ。cmd は制御プロセスの出力（control_proc.CMD_N）"""
@@ -127,8 +135,10 @@ class MapRecorder:
             # 自分の動きの手がかり（指令。車輪の回転計は無い）。station は撮った場所の番号
             # （走っている間の分は、着いた先の station に入れる。control_proc の ex_station）
             entry.update(steer_deg=float(cmd[1]), speed=float(cmd[2]), moving=moving)
-            if len(cmd) > 21:
-                entry["station"] = int(cmd[21])
+            from .control_proc import C_EX_STATION
+
+            if len(cmd) > C_EX_STATION:
+                entry["station"] = int(cmd[C_EX_STATION])
         self.entries.append(entry)
         # 途中で止まっても（サービスの入れ替え・電池切れ）残るよう、1 枚ごとに足していく
         with open(self.dir / "frames.jsonl", "a") as f:
@@ -142,10 +152,24 @@ class MapRecorder:
             return
         row = {"t_capture_ns": t_ns, "clear_cm": clear_cm, "clear_conf": clear_conf,
                "clear_skip": clear_skip, "ultrasonic_cm": ultrasonic_cm}  # fmt: skip
-        with open(d / "clear.jsonl", "a") as f:
-            f.write(json.dumps(row) + "\n")
+        with self._clear_lock:
+            if self._clear_f is None or self._clear_dir != d:
+                self._close_clear()
+                self._clear_f, self._clear_dir = open(d / "clear.jsonl", "a"), d
+            self._clear_f.write(json.dumps(row) + "\n")
+            now = time.monotonic()
+            if now - self._clear_flushed >= CLEAR_FLUSH_S:
+                self._clear_f.flush()
+                self._clear_flushed = now
+
+    def _close_clear(self) -> None:
+        if self._clear_f is not None:
+            self._clear_f.close()
+            self._clear_f, self._clear_dir = None, None
 
     def finish(self) -> None:
+        with self._clear_lock:
+            self._close_clear()
         if self.dir is None:
             return
         # 2: チルトを較正した後（指令 0° が水平）。1 は指令 0° で実際は約 +26.5°

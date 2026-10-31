@@ -22,7 +22,7 @@ import threading
 import time
 from collections import deque
 
-from .control_proc import AGENT_N, C_AGENT_ID
+from .control_proc import AGENT_N, C_AGENT_ID, C_EX_STATION
 from .controller import (
     A_LOOK,
     A_MOVE,
@@ -252,7 +252,7 @@ class AgentClient:
             return {"pan_deg": round(float(v[3]), 1), "tilt_deg": round(float(v[4]), 1)}
         if run["kind"] == "scan":
             st = getattr(self.runner, "station", None)
-            k = int(v[21]) - 1
+            k = int(v[C_EX_STATION]) - 1
             rec = getattr(self.runner, "recorder", None)
             return {"session_id": rec.dir.name if rec is not None and rec.dir is not None else None,
                     "station_id": k,

@@ -17,7 +17,18 @@ import json
 import threading
 import time
 
-from .control_proc import PLAN_N
+from .control_proc import (
+    C_EX_STATION,
+    C_LOW_PASSED,
+    C_SEG_DRIVEN,
+    C_STATION_WAIT,
+    C_STEP_DRIVEN,
+    C_STEP_REASON,
+    C_STEP_S,
+    C_STEP_SPEED,
+    C_STEP_STATION,
+    PLAN_N,
+)
 from .controller import (
     MAX_SEGMENTS,
     PLAN_DONE,
@@ -90,6 +101,8 @@ class StationClient:
         self._was_explore = False
         # station ごとの返事の action（agent の scan の結果に書く）
         self.replies: dict[int, str] = {}
+        # station ごとの、そこまで走ってくる間の画像の動き（motion.MotionWatch.take_runs）
+        self._motion_runs: dict[int, list[dict]] = {}
 
     def run(self, stop: threading.Event) -> None:
         errors = ErrorLog("station")
@@ -109,7 +122,11 @@ class StationClient:
             if self._session != rec.dir.name:
                 self._session, self._posted, self._moves = rec.dir.name, -1, {}
                 self._reshoots, self._reshoot_k = {}, -1
-            k = int(v[18])
+                self._motion_runs = {}
+                motion = getattr(self.runner, "motion", None)
+                if motion is not None:
+                    motion.take_runs()  # 前の explore の分は使わない
+            k = int(v[C_STATION_WAIT])
             if self._reshoot_k >= 0 and k != self._reshoot_k:
                 # 制御プロセスが撮り直し始めた。撮り終えて同じ番号でまた待ったら送る
                 self._reshoot_k, self._posted = -1, -1
@@ -146,8 +163,24 @@ class StationClient:
         if explore and rec is not None and rec.dir is not None:
             phase = phase_of(v)
             # 返事を待っている station はまだ終わっていない（戻ったら撮り直して送る）
-            nxt = int(v[18]) if phase == "plan" else int(v[21])
+            nxt = int(v[C_STATION_WAIT]) if phase == "plan" else int(v[C_EX_STATION])
             self.explore_state.write(rec.dir.name, nxt, phase)
+
+    def _note_motion(self, k: int, prev: dict) -> None:
+        """走ったひと続きごとの画像の動きを prev_step に付ける。前へ走る短い 1 歩は、制御プロセスの
+        詰まりの検知（最短 2.2 s）が間に合わないので、画像が動いていなかったら stuck にする"""
+        motion = getattr(self.runner, "motion", None)
+        if motion is None:
+            return
+        if k not in self._motion_runs:
+            self._motion_runs[k] = motion.take_runs()  # 送り直しでも同じものを付ける
+        runs = self._motion_runs[k]
+        if not runs:
+            return
+        prev["image_motion"] = runs
+        still = [r for r in runs if r["moved"] is False and not r["reverse"]]
+        if still and prev["stop_reason"] == "done":
+            prev["stop_reason"] = "stuck"
 
     def _can_reshoot(self, k: int) -> bool:
         return self._reshoots.get(k, 0) < MAX_RESHOOTS
@@ -197,13 +230,14 @@ class StationClient:
         if k > 0 and agent is not None:
             prev = agent.prev_step()  # agent の move（サーバーの 1 歩は走っていない）
         elif k > 0:
-            secs, reason = float(v[19]), STOP_REASONS[int(v[20])]
-            segs = self._moves.get(int(v[23])) if int(v[23]) >= 0 else None
+            secs, reason = float(v[C_STEP_S]), STOP_REASONS[int(v[C_STEP_REASON])]
+            step_k = int(v[C_STEP_STATION])
+            segs = self._moves.get(step_k) if step_k >= 0 else None
             if segs is not None:
-                speed = float(v[24])  # 上限（explore_speed）で抑えた後の、前へ使った速さ
+                speed = float(v[C_STEP_SPEED])  # 上限（explore_speed）で抑えた後の、前へ使った速さ
                 # 区切りは実際に走った所まで（途中で止めたら、その区切りは止まった所まで）。
                 # 距離は guard・電池を通した後の速さで数えたもの（速さ × 秒では、待った間も進んだことになる）
-                driven = [float(x) for x in v[26 : 26 + MAX_SEGMENTS]]
+                driven = [float(x) for x in v[C_SEG_DRIVEN : C_SEG_DRIVEN + MAX_SEGMENTS]]
                 done = [(s_, round(d, 1), b) for (s_, _, b, _), d in zip(segs, driven, strict=False)
                         if d > 0.05]  # fmt: skip
                 done = done or [(segs[0][0], 0.0, segs[0][2])]
@@ -211,9 +245,10 @@ class StationClient:
                 prev = {"steer_deg": done[-1][0], "speed": abs(speed), "reverse": all(b for *_, b in done),
                         "segments": [{"steer_deg": s_, "distance_cm": d, "reverse": b} for s_, d, b in done],
                         "seconds": round(secs, 2),
-                        "est_distance_cm": round(float(v[25]), 1),
+                        "est_distance_cm": round(float(v[C_STEP_DRIVEN]), 1),
                         "stop_reason": reason,
-                        "low_obstacle_passed": int(v[22])}  # fmt: skip
+                        "low_obstacle_passed": int(v[C_LOW_PASSED])}  # fmt: skip
+                self._note_motion(k, prev)
         us = self.runner.last_us
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
                 "mode": "agent" if agent is not None else "explore", "frames": entries,

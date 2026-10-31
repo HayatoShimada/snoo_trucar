@@ -77,9 +77,10 @@ class ExploreState:
 
 def phase_of(cmd) -> str:
     """制御プロセスの出力（control_proc.CMD_N）から、explore の今の段階"""
+    from .control_proc import C_STATION_WAIT
     from .controller import DRIVE_INDEX
 
-    if int(cmd[18]) >= 0:
+    if int(cmd[C_STATION_WAIT]) >= 0:
         return "plan"
     if int(cmd[13]) == DRIVE_INDEX:
         return "step"

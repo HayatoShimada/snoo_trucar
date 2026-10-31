@@ -145,8 +145,10 @@ class Voice:
                 else:
                     self.event("探索をやめました。")
         self._mode = mode
-        if len(v) > 20:
-            step = (float(v[19]), int(v[20]))
+        from .control_proc import C_STEP_REASON, C_STEP_S
+
+        if len(v) > C_STEP_REASON:
+            step = (float(v[C_STEP_S]), int(v[C_STEP_REASON]))
             if self._step is not None and step != self._step and STOP_REASONS[step[1]] == "stuck":
                 self.event("引っかかって止まりました。")
             self._step = step

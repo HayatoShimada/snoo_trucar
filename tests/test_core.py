@@ -669,6 +669,7 @@ def test_station_client_posts_and_writes_the_plan(tmp_path):
         assert plan.read()[0] == n
     finally:
         srv.shutdown()
+        srv.server_close()
         plan.close()
 
 

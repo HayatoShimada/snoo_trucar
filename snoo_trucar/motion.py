@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 
 import numpy as np
@@ -24,6 +25,13 @@ STUCK_HOLD_S = 1.0  # 動いていないのがこれだけ続いたら、進め�
 # ぶつかっても他に気づく手段が無いので、早めに止める方を取る
 WARMUP_REVERSE_S = 0.4
 STUCK_HOLD_REVERSE_S = 0.4
+# 前へ走る短い 1 歩（20 cm で約 1 s）は、上の判定（最短 2.2 s）では終わるまで気づけない。
+# そこで走ったひと続き（run）ごとに、走り出して RUN_REF_S（首が向きを変え終わる）後の画像を
+# 基にして、それとの差の最大を覚える。止まったとき、その差がざらつきと変わらなければ
+# 「動いていなかった」とする
+# （station.py が prev_step の stop_reason を stuck にする。#21 のレビューの E）
+RUN_REF_S = 0.4
+RUN_MIN_SAMPLES = 2  # 基にした画像の後に、これだけ比べられたときだけ決める
 FACTOR = 1.3  # 止まっているときのざらつきの何倍より小さければ、動いていないとみなす（走っている 1 秒差は 10 以上、止まっているときは 6〜7 以下）
 NOISE_FLOOR = 2.0
 
@@ -45,6 +53,12 @@ class MotionWatch:
         self._slow_since: float | None = None
         self._reverse = False
         self.stuck = False
+        # 走ったひと続きごとの判定（moved: True 動いていた / False 動いていなかった /
+        # None 短すぎて分からない）
+        self.runs: list[dict] = []
+        self._run: dict | None = None
+        # feed はカメラのスレッド、take_runs は station のスレッド
+        self._runs_lock = threading.Lock()
 
     def due(self, t: float) -> bool:
         """この時刻の画像を縮めて渡すべきか（重い JPEG の展開を間引くため）"""
@@ -54,6 +68,7 @@ class MotionWatch:
         """small は shrink() したもの。moving は前後に走らせているか（ハンドルだけ・首だけは含めない）。
         reverse は下がっているか"""
         self._last = t
+        self._track_run(t, small, moving, reverse)
         if moving:
             self._still_since = None
             if self._moving_since is None or reverse != self._reverse:
@@ -89,6 +104,39 @@ class MotionWatch:
             self._slow_since = None
             self.stuck = False
         return self.stuck
+
+    def _track_run(self, t: float, small: np.ndarray, moving: bool, reverse: bool) -> None:
+        run = self._run
+        if run is not None and (not moving or reverse != run["reverse"]):
+            self._end_run(t)
+            run = None
+        if not moving:
+            return
+        if run is None:
+            run = self._run = {"t0": t, "reverse": reverse, "ref": None, "max": 0.0, "n": 0}
+        if run["ref"] is None:
+            if t - run["t0"] >= RUN_REF_S - 1e-6:
+                run["ref"] = small
+            return
+        run["max"] = max(run["max"], float(np.abs(small - run["ref"]).mean()))
+        run["n"] += 1
+
+    def _end_run(self, t: float) -> None:
+        run, self._run = self._run, None
+        moved = None
+        if run["n"] >= RUN_MIN_SAMPLES:
+            moved = run["max"] >= FACTOR * max(self.noise, NOISE_FLOOR)
+        row = {"seconds": round(t - run["t0"], 2), "reverse": run["reverse"],
+               "diff": round(run["max"], 1), "noise": round(self.noise, 1),
+               "moved": moved}  # fmt: skip
+        with self._runs_lock:
+            self.runs = self.runs[-19:] + [row]
+
+    def take_runs(self) -> list[dict]:
+        """前に取ってから走ったひと続きの判定（station.py が prev_step に付ける）"""
+        with self._runs_lock:
+            runs, self.runs = self.runs, []
+        return runs
 
     def _at(self, t: float) -> np.ndarray | None:
         """t より前で、いちばん新しい画像"""

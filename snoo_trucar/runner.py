@@ -64,7 +64,10 @@ class Runner:
         self.last_us: float | None = None
         self.last_us_t_ns = 0  # 超音波が最後に測れた時刻（monotonic_ns）
         self.stop = threading.Event()
-        self.history: list[tuple] = []  # (t, state, bearing_est, dist_est, bearing_true, dist_true)
+        # (t, state, bearing_est, dist_est, bearing_true, dist_true, …)。
+        # シミュレーションのときだけ溜める
+        # （実機で 200 Hz に溜めると 1 時間で約 270 MB。#21 のレビューの 4）
+        self.history: list[tuple] = []
         self.world = None
         self.link = None
         self.camera = None
@@ -403,7 +406,9 @@ class Runner:
             time.sleep(max(0.0, nxt - time.monotonic()))
 
     def _record(self, t: float, v) -> None:
-        truth = self.world.truth() if self.world is not None else (float("nan"),) * 2
+        if self.world is None:
+            return
+        truth = self.world.truth()
         self.history.append((t, int(v[5]), v[7], v[8], *truth, v[3], v[2], v[6]))
 
     def _status(self, v) -> str:

@@ -38,6 +38,9 @@ MODE_N = 3
 #      teleop で弱めた理由（controller.TELEOP_LIMITS のビット）,
 #      今使っている clear_cm（無ければ -1）
 CMD_N = 26 + MAX_SEGMENTS + 5 + 2
+# cmd の中の番号（18 から後。メインプロセスはこの名前で読む）
+C_STATION_WAIT, C_STEP_S, C_STEP_REASON, C_EX_STATION, C_LOW_PASSED = 18, 19, 20, 21, 22
+C_STEP_STATION, C_STEP_SPEED, C_STEP_DRIVEN, C_SEG_DRIVEN = 23, 24, 25, 26
 C_AGENT_ID = 26 + MAX_SEGMENTS  # cmd の中の agent の欄の始め（id, 様子, 理由, cm, 秒）
 C_TELEOP_LIMIT = C_AGENT_ID + 5
 C_CLEAR_CM = C_AGENT_ID + 6

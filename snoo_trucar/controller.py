@@ -499,35 +499,43 @@ class Controller:
         return pan, ctl.search_tilt_deg, steer, speed
 
     def _explore(self, dt: float):
-        ctl = self.ctl
+        """explore を 1 回分進める。段階ごと：撮る（_scan_tick）→ 返事を待つ（_explore_plan）→
+        サーバーの 1 歩を走る（_step）。(パン, チルト, ハンドル, 速さ)"""
+        stop = (0.0, 0.0, 0.0, 0.0)
         self._ex_total += dt
-        if self._ex_total >= ctl.explore_max_s:
+        if self._ex_total >= self.ctl.explore_max_s:
             self.set_mode("idle")
-            return 0.0, 0.0, 0.0, 0.0
+            return stop
         self._ex_t += dt
         if self._ex_phase == "scan":
             pose = self._scan_tick()
-            return (*pose, 0.0, 0.0) if pose is not None else (0.0, 0.0, 0.0, 0.0)
-        if self._ex_phase == "plan":
-            self.cmd.scan_index = -1
-            p = self.plan
-            if p is None or int(p[0]) != self.station_wait:
-                # 返事を待つ。届かなければ StationClient が送り直す（Pi では道を決めない）
-                return 0.0, 0.0, 0.0, 0.0
-            action = int(p[1])
-            if action == PLAN_DONE:
-                self.station_wait = -1
-                self.set_mode("idle")  # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
-                return 0.0, 0.0, 0.0, 0.0
-            if action == PLAN_RESHOOT:
-                self._reshoot()
-                return 0.0, 0.0, 0.0, 0.0
-            if action != PLAN_MOVE:
-                return 0.0, 0.0, 0.0, 0.0  # 前の版の PLAN_FALLBACK などは待つのと同じ
-            self.station_wait = -1
-            self._start_step(p)
+            return (*pose, 0.0, 0.0) if pose is not None else stop
+        if self._ex_phase == "plan" and not self._explore_plan():
+            return stop
         self.cmd.scan_index = DRIVE_INDEX
         return self._step()
+
+    def _explore_plan(self) -> bool:
+        """撮った分を送ってサーバーの返事を待つ。1 歩を走り始めたら True"""
+        self.cmd.scan_index = -1
+        p = self.plan
+        if p is None or int(p[0]) != self.station_wait:
+            # 返事を待つ。届かなければ StationClient が送り直す（Pi では道を決めない）
+            return False
+        action = int(p[1])
+        if action == PLAN_DONE:
+            self.station_wait = -1
+            # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
+            self.set_mode("idle")
+            return False
+        if action == PLAN_RESHOOT:
+            self._reshoot()
+            return False
+        if action != PLAN_MOVE:
+            return False  # 前の版の PLAN_FALLBACK などは待つのと同じ
+        self.station_wait = -1
+        self._start_step(p)
+        return True
 
     def _scan_tick(self):
         """止まって首を振って撮る（explore と agent の scan）。今の向き (パン, チルト) を返す。
