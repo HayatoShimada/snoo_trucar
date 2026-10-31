@@ -4,6 +4,11 @@
 （前の station から走ってくる間の分も）と scan.json の形のメタデータを POST し、返事を plan に書く。
 道はサーバーがすべて決める（区切りごとに前・後ろ。"gear_segments"）。返事が来ない・失敗したら、
 RETRY_S おきに送り直す（制御プロセスは止まって待つ。Pi では道を決めない）。仕様は docs/PROTOCOL.md。
+
+止まって撮ったコマが足りない（0 枚など）ときは送らず、その場で撮り直させる（PLAN_RESHOOT）。
+サーバーが 4xx（中身がおかしい）を返したときも、同じものを送り直さず撮り直させる。撮り直しは
+MAX_RESHOOTS 回まで。それでも 1 枚も無い・断られるなら、探索をやめる
+（PLAN_DONE。止まって待ち続けない）。
 """
 
 from __future__ import annotations
@@ -13,13 +18,27 @@ import threading
 import time
 
 from .control_proc import PLAN_N
-from .controller import MAX_SEGMENTS, PLAN_DONE, PLAN_MOVE, PLAN_SEG_N, STOP_REASONS
+from .controller import (
+    MAX_SEGMENTS,
+    PLAN_DONE,
+    PLAN_MOVE,
+    PLAN_RESHOOT,
+    PLAN_SEG_N,
+    STOP_REASONS,
+    scan_poses,
+)
 from .errlog import ErrorLog
 
 # 地図のサーバーに届かない・失敗したとき、送り直すまでの秒
 RETRY_S = 3.0
 # サーバーに伝える、Pi ができること
 SUPPORTS = ["reverse", "segments", "long_step", "gear_segments"]
+# 1 つの station を撮り直す回数の上限
+MAX_RESHOOTS = 2
+
+
+class Rejected(RuntimeError):
+    """サーバーが 4xx を返した（中身がおかしい）。同じものを送り直しても通らない"""
 
 
 def parse_move(ans: dict) -> tuple[list[tuple[float, float, bool, float | None]], float, float]:
@@ -58,6 +77,14 @@ class StationClient:
         # step_station で伝える
         self._moves: dict[int, list[tuple[float, float, bool, float | None]]] = {}
         self.last = ""  # 状態の行に出す
+        # 止まって撮る向きの数。これの半分より少なければ撮り直す
+        # （撮り直しの上限の後は 1 枚でも送る）
+        ctl = self.cfg.control
+        self.n_poses = len(scan_poses(ctl.explore_scan_tilts, ctl.explore_scan_pans,
+                                      self.cfg.car.pan_min, self.cfg.car.pan_max))  # fmt: skip
+        self._reshoots: dict[int, int] = {}  # station ごとの撮り直した回数
+        # 撮り直させた station。制御プロセスが撮り始める（待つのをやめる）まで送らない
+        self._reshoot_k = -1
 
     def run(self, stop: threading.Event) -> None:
         errors = ErrorLog("station")
@@ -74,15 +101,63 @@ class StationClient:
         if v is not None and rec is not None and rec.dir is not None:
             if self._session != rec.dir.name:
                 self._session, self._posted, self._moves = rec.dir.name, -1, {}
+                self._reshoots, self._reshoot_k = {}, -1
             k = int(v[18])
+            if self._reshoot_k >= 0 and k != self._reshoot_k:
+                # 制御プロセスが撮り直し始めた。撮り終えて同じ番号でまた待ったら送る
+                self._reshoot_k, self._posted = -1, -1
             if k >= 0 and k != self._posted and time.monotonic() >= self._retry_at:
                 self._posted = k
-                if not self._post(k, v, rec):
+                stills = sum(1 for e in list(rec.entries)
+                             if e.get("station") == k and not e.get("moving"))  # fmt: skip
+                few = f"止まって撮ったコマが {stills}/{self.n_poses} 枚"
+                if stills < max(1, self.n_poses // 2) and self._can_reshoot(k):
+                    self._reshoot(k, f"{few}（{self._why_few(k, rec)}）")
+                    return
+                if stills == 0:  # 撮り直しても撮れない。送っても 400 になる
+                    self._give_up(k, f"{MAX_RESHOOTS} 回撮り直しても{few}（{self._why_few(k, rec)}）")
+                    return
+                ok = self._post(k, v, rec)
+                if ok is None:  # 4xx：同じものは送り直さない
+                    if self._can_reshoot(k):
+                        self._reshoot(k, "サーバーに断られた")
+                    else:
+                        self._give_up(k, "撮り直してもサーバーに断られた")
+                elif not ok:
                     # 届かない・失敗：制御プロセスは待ち続けるので、少しして同じ station を送り直す
                     self._posted, self._retry_at = -1, time.monotonic() + RETRY_S
 
-    def _post(self, k: int, v, rec) -> bool:
-        """送って返事を plan に書く。返事を書けたら True"""
+    def _can_reshoot(self, k: int) -> bool:
+        return self._reshoots.get(k, 0) < MAX_RESHOOTS
+
+    def _reshoot(self, k: int, why: str) -> None:
+        n = self._reshoots[k] = self._reshoots.get(k, 0) + 1
+        self._reshoot_k = k
+        self.last = f"station {k}: {why} → 撮り直す（{n}/{MAX_RESHOOTS} 回目）"
+        print(self.last, flush=True)
+        self.plan_buf.write((k, PLAN_RESHOOT) + (0.0,) * (PLAN_N - 2))
+
+    def _give_up(self, k: int, why: str) -> None:
+        """送っても通らない。止まって待ち続けないよう、探索をやめる（idle）。_posted は k のまま"""
+        self.last = f"station {k}: {why}。探索をやめる"
+        print(self.last, flush=True)
+        self.plan_buf.write((k, PLAN_DONE) + (0.0,) * (PLAN_N - 2))
+
+    def _why_few(self, k: int, rec) -> str:
+        """撮れなかった訳の手がかり：カメラ（最後のコマの古さ）・書き込みの失敗・時刻の窓に来なかった向き"""
+        n = max(1, self.n_poses)
+        missed = [i for i in getattr(rec, "missed", []) if i // n == k]
+        last = getattr(rec, "last_offer_ns", 0)
+        if last:
+            cam = f"カメラの最後のコマ {(time.monotonic_ns() - last) / 1e9:.1f}s 前"
+        else:
+            cam = "カメラのコマが来ていない"
+        return (f"{cam}、書き込みの失敗 {getattr(rec, 'write_errors', 0)} 回、"
+                f"撮る前に次の向きへ替わった {len(missed)} 向き、置き場 {rec.dir}")  # fmt: skip
+
+    def _post(self, k: int, v, rec) -> bool | None:
+        """送って返事を plan に書く。返事を書けたら True、届かない・失敗（送り直せば
+        通りうる）は False、サーバーが 4xx で断った（送り直しても通らない）は None"""
         entries = [dict(e) for e in list(rec.entries) if e.get("station") == k]
         link = getattr(self.runner, "link", None)
         if link is not None:
@@ -129,6 +204,8 @@ class StationClient:
                      for e in entries]  # fmt: skip
             r = requests.post(self.cfg.server.map_url, data={"meta": json.dumps(meta)}, files=files,
                               timeout=self.cfg.server.map_timeout_s)  # fmt: skip
+            if 400 <= r.status_code < 500:
+                raise Rejected(f"{r.status_code} {r.text[:200]}")
             if r.status_code != 200:
                 raise RuntimeError(f"{r.status_code} {r.text[:200]}")
             ans = r.json()
@@ -143,6 +220,11 @@ class StationClient:
                 self.last = f"station {k}: 終わり（{ans.get('reason')}）"
             else:
                 raise RuntimeError(f"知らない返事: {ans}")
+        except Rejected as e:
+            self.last = (f"station {k}: 地図のサーバーに断られた（{str(e)[:120]}）"
+                         "。同じものは送り直さない")  # fmt: skip
+            print(self.last, flush=True)
+            return None
         except Exception as e:  # 届かない・失敗 → 送り直して待つ（Pi では道を決めない）
             self.last = (f"station {k}: 地図のサーバーに届かない（{type(e).__name__}: {str(e)[:80]}）"
                          f"→ {RETRY_S:.0f} 秒後に送り直す")  # fmt: skip

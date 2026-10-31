@@ -27,11 +27,17 @@ class MapRecorder:
         self._drive_n = 0
         self._pose = (0.0, 0.0)  # 直前のフレームのときの向き（指令）
         self._settle = SETTLE_S
+        # 撮れなかった訳を出すため（station.py）。最後にカメラのコマが来た時刻、撮る前に次の向きへ
+        # 替わった向き（scan_index。時刻の窓に来なかった）、書き込みに失敗した回数
+        self.last_offer_ns = 0
+        self.missed: list[int] = []
+        self.write_errors = 0
 
     def offer(self, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm: float | None) -> None:
         """カメラの 1 フレームごとに呼ぶ。cmd は制御プロセスの出力（control_proc.CMD_N）"""
         from .controller import DRIVE_INDEX, MODES
 
+        self.last_offer_ns = t_ns
         mode = MODES[int(cmd[14])] if cmd is not None else "idle"
         if mode not in ("map", "explore"):
             self.finish()
@@ -44,6 +50,7 @@ class MapRecorder:
             self.dir = self.root / time.strftime(f"{mode}_%Y%m%d_%H%M%S")
             self.dir.mkdir(parents=True, exist_ok=True)
             self.entries, self._saved = [], set()
+            self.missed, self.write_errors = [], 0
             print(f"マッピング開始: {self.dir}", flush=True)
         now = time.monotonic()
         if index == DRIVE_INDEX:
@@ -56,6 +63,8 @@ class MapRecorder:
             return
         pose = (float(cmd[3]), float(cmd[4]))
         if index != self._index:
+            if self._index >= 0 and self._index not in self._saved:
+                self.missed = self.missed[-99:] + [self._index]
             settle = SETTLE_S
             if mode == "explore":
                 # 向きの差に合わせて待つ（controller.scan_schedule と同じ）
@@ -68,13 +77,19 @@ class MapRecorder:
         self._pose = pose
         if index in self._saved or now - self._since < self._settle:
             return
-        self._save(f"{index:02d}", t_ns, jpeg, cmd, ultrasonic_cm, moving=False)
-        self._saved.add(index)
+        if self._save(f"{index:02d}", t_ns, jpeg, cmd, ultrasonic_cm, moving=False):
+            self._saved.add(index)
 
-    def _save(self, stem: str, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm, moving: bool) -> None:
+    def _save(self, stem: str, t_ns: int, jpeg: bytes, cmd, ultrasonic_cm, moving: bool) -> bool:
         pan, tilt = float(cmd[3]), float(cmd[4])
         name = f"{stem}_pan{pan:+04.0f}_tilt{tilt:+03.0f}.jpg"
-        (self.dir / name).write_bytes(jpeg)
+        try:
+            (self.dir / name).write_bytes(jpeg)
+        except OSError as e:  # SD がいっぱい・壊れた。entries に入れない（送れない画像を載せない）
+            self.write_errors += 1
+            if self.write_errors <= 3:
+                print(f"画像を書けなかった（{name}）: {e}", flush=True)
+            return False
         entry = {"file": name, "t_capture_ns": t_ns, "pan_deg": pan, "tilt_deg": tilt,
                  "ultrasonic_cm": ultrasonic_cm}  # fmt: skip
         if self.mode == "explore":
@@ -87,6 +102,7 @@ class MapRecorder:
         # 途中で止まっても（サービスの入れ替え・電池切れ）残るよう、1 枚ごとに足していく
         with open(self.dir / "frames.jsonl", "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
 
     def note_clear(self, t_ns: int, clear_cm, clear_conf, clear_skip, ultrasonic_cm) -> None:
         """サーバーが画像から出した通り道の空きを clear.jsonl に残す（t_capture_ns で frames と突き合わせる）"""
