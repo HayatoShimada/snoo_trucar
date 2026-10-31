@@ -80,7 +80,9 @@ def scan_schedule(pan0: float, tilt0: float, poses=EXPLORE_POSES) -> list[float]
 # それより長く欄が無い（clear_cm を出さないサーバー）なら、見えていないので clear_skip と同じく遅く・短く
 CLEAR_ABSENT_GRACE_S = 0.5
 EXPLORE_PLAN_TIMEOUT_S = 25.0  # サーバーの返事をこれだけ待っても来なければ、待ち続けていると表に出す
-PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK = 0, 1, 2, 3
+# PLAN_RESHOOT: 止まって撮ったコマが足りない（0 枚など）ので、送らずに
+# 同じ station をその場で撮り直す
+PLAN_NONE, PLAN_MOVE, PLAN_DONE, PLAN_FALLBACK, PLAN_RESHOOT = 0, 1, 2, 3, 4
 MAX_SEGMENTS = 5  # サーバーの 1 歩の区切り（segments）の数の上限
 # plan の共有メモリの 1 区切りの数（ハンドル、符号付きの cm（負は後ろへ）、clear_cm の下限（無ければ -1））
 PLAN_SEG_N = 3
@@ -443,12 +445,21 @@ class Controller:
                 self.station_wait = -1
                 self.set_mode("idle")  # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
                 return 0.0, 0.0, 0.0, 0.0
+            if action == PLAN_RESHOOT:
+                self._reshoot()
+                return 0.0, 0.0, 0.0, 0.0
             if action != PLAN_MOVE:
                 return 0.0, 0.0, 0.0, 0.0  # 前の版の PLAN_FALLBACK などは待つのと同じ
             self.station_wait = -1
             self._start_step(p)
         self.cmd.scan_index = DRIVE_INDEX
         return self._step()
+
+    def _reshoot(self) -> None:
+        """待っている station を同じ番号のまま撮り直す。scan_index も同じなので、撮れた向きは
+        メインプロセスが撮り直さず、足りない向きだけ足す。直前の 1 歩（prev_step の元）はそのまま"""
+        self._ex_stop, self.station_wait, self.plan = self.station_wait, -1, None
+        self._ex_phase, self._ex_t, self._ex_sched_stop = "scan", 0.0, -1
 
     def _start_step(self, p) -> None:
         """plan（control_proc.PLAN_N）から、サーバーの 1 歩を走り始める。区切りの距離は、前へは合わせて
