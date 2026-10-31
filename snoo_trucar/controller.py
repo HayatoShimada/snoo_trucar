@@ -17,6 +17,9 @@
 - AGENT: エージェントの指令（look・move・scan・stop）を実行する（mode = agent。snoo_trucar#28、
   rocm_opencv_server の docs/agent_robot.md）。自分では走らない。move は explore の 1 歩と同じ止め方
   （clear_cm・stuck）に、guard・snoo が近い・電池・heartbeat・時間切れを足す
+- TELEOP: 人がブラウザ・ゲームパッドから手で操縦する（mode = teleop。snoo_trucar#27、
+  rocm_opencv_server の docs/teleop.md）。指令が 0.3 s 来なければ止まる（deadman）。guard・電池・
+  clear_cm（20 cm）はいつも効く。超音波では止めない（#26 と同じ）
 """
 
 from __future__ import annotations
@@ -29,13 +32,13 @@ from .config import CarConfig, ControlConfig
 from .estimator import TargetEstimator
 from .guard import OK, Guard
 
-SEARCH, TRACK, COAST, IDLE, MAP, EXPLORE, AGENT = 0, 1, 2, 3, 4, 5, 6
+SEARCH, TRACK, COAST, IDLE, MAP, EXPLORE, AGENT, TELEOP = 0, 1, 2, 3, 4, 5, 6, 7
 STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", MAP: "MAP",
-               EXPLORE: "EXPLORE", AGENT: "AGENT"}  # fmt: skip
+               EXPLORE: "EXPLORE", AGENT: "AGENT", TELEOP: "TELEOP"}  # fmt: skip
 # idle: 待機 / watch: 探してカメラで追う / keep: 距離を保つ（近づく・離れる）/ follow: 追いかける /
-# map: 部屋を撮る / explore: 部屋を動きながら撮る / agent: エージェントの指令を実行する
-# （共有メモリでは番号なので、足すときは後ろに）
-MODES = ("idle", "watch", "keep", "follow", "map", "explore", "agent")
+# map: 部屋を撮る / explore: 部屋を動きながら撮る / agent: エージェントの指令を実行する /
+# teleop: 手で操縦する（共有メモリでは番号なので、足すときは後ろに）
+MODES = ("idle", "watch", "keep", "follow", "map", "explore", "agent", "teleop")
 # agent の指令（control_proc の agent の共有メモリ）。種類・様子・止めた理由
 A_NONE, A_LOOK, A_MOVE, A_SCAN, A_STOP = 0, 1, 2, 3, 4
 AGENT_KINDS = ("", "look", "move", "scan", "stop")
@@ -47,6 +50,22 @@ AGENT_HEARTBEAT_NS = 3_000_000_000  # 問い合わせがこれだけ通らなけ
 AGENT_MAX_CM = 30.0  # move の上限（サーバーも確かめるが、Pi でももう一度収める）
 AGENT_MAX_SPEED = 10.0
 AGENT_LOOK_S = 0.5  # look で首を向けてから止まるのを待つ
+# teleop（docs/teleop.md）。上限はサーバーと同じものを Pi でももう一度
+TELEOP_SPEED = (-10.0, 15.0)
+TELEOP_STEER_MAX = 28.0
+TELEOP_TILT = (-20.0, 30.0)
+TELEOP_DEADMAN_NS = 300_000_000  # 最後に受けた返事がこれより古ければ止まる
+TELEOP_CLEAR_STOP_CM = 20.0
+# 手の指令より弱めた理由（cmd の teleop_limit のビット。問い合わせの limit に名前で返す）
+TELEOP_LIMITS = ("deadman", "poll", "stopped", "guard", "battery", "sonar", "clear", "mode")
+
+
+def limit_names(bits: int) -> list[str]:
+    return [n for i, n in enumerate(TELEOP_LIMITS) if int(bits) >> i & 1]
+
+
+def _bit(name: str) -> int:
+    return 1 << TELEOP_LIMITS.index(name)
 MAP_PANS = (-35.0, -25.0, -15.0, -5.0, 5.0, 15.0, 25.0, 35.0)
 # チルトは picar-x.conf の較正（picarx_cam_tilt_servo = 26.5）で 0° が水平。床・壁・家具の高さを撮る
 MAP_TILTS = (-15.0, 0.0, 15.0)
@@ -204,6 +223,12 @@ class Controller:
         self._agent_end = 0.0  # move の時間切れ（秒）
         self._agent_snoo_near = False
         self._agent_seen = 0  # いちばん新しく見た指令の id
+        # teleop（set_teleop）: (返事を受けた時刻, seq, ハンドル, 速さ, パン, チルト, ok)。
+        # ok は 1: 使ってよい / 0: サーバーが古い（deadman）・まだ無い /
+        # -1: サーバーが stop と言った
+        self._tele = (0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self._tele_enter_ns = 0  # teleop に入った時刻（それより前に受けた指令は使わない）
+        self.teleop_limit = 0  # 弱めた理由（TELEOP_LIMITS のビット）
 
     def set_clear(self, state: int, cm: float, now_ns: int, t_capture_ns: int = 0) -> None:
         """state は CLEAR_*。t_capture_ns はその返事の画像を撮った時刻（age_clear で古さを見る）"""
@@ -245,6 +270,10 @@ class Controller:
                 self._agent_finish(AS_CANCELLED, "mode")  # USR・ほかのモードに替わった
             if mode == "agent":
                 self._agent_pose = (self.cmd.pan, self.cmd.tilt)
+            if mode == "teleop" or self.mode == "teleop":
+                # 入ったとき・出たときは、速さ 0・ハンドル 0 から（前のモードの指令を持ち越さない）
+                self._tele_enter_ns = self._now_ns + 1
+                self.cmd.steer = self.cmd.speed = 0.0
             self.mode = mode
             self._map_t = 0.0
             self._search_t = 0.0
@@ -307,6 +336,8 @@ class Controller:
             far = state != SEARCH and est.dist.x[0] > ctl.explore_snoo_near_cm
             if state == SEARCH or far:
                 state = EXPLORE
+        if self.mode == "teleop":
+            state = TELEOP  # snoo が見えていても追わない（人が操縦する）
         if self.mode == "agent":
             # snoo が見えていても追わない（指令の首の向きのまま）。近ければ move を止める（_agent）
             near = est.valid and since < ctl.coast_s and est.dist.x[0] < ctl.explore_snoo_near_cm
@@ -327,6 +358,8 @@ class Controller:
             pan_goal, tilt_goal, steer, speed = self._search(dt)
         elif state == AGENT:
             pan_goal, tilt_goal, steer, speed = self._agent(dt)
+        elif state == TELEOP:
+            pan_goal, tilt_goal, steer, speed = self._teleop()
         elif state == EXPLORE:
             pan_goal, tilt_goal, steer, speed = self._explore(dt)
             if self.mode == "idle":  # 時間切れ
@@ -346,13 +379,20 @@ class Controller:
         # snoo のいない探索まで遊びに数えると、3 分で 10 分休んでしまう
         seen = est.valid and since < ctl.coast_s
         playing = self.mode in ("keep", "follow") or (
-            self.mode in ("explore", "agent") and est.valid and since < ctl.lost_s
+            self.mode in ("explore", "agent", "teleop") and est.valid and since < ctl.lost_s
         )
+        asked = (steer, speed)
         steer, speed = self.guard.apply(
             playing, dt, steer, speed,
             est.dist.x[0] if seen else None, est.dist.x[1] if seen else None,
         )
         cmd.guard = self.guard.state
+        if state == TELEOP:
+            if (steer, speed) != asked or self.guard.state != OK:
+                self.teleop_limit |= _bit("guard")
+            speed = self._teleop_safety(speed)
+        else:
+            self.teleop_limit = _bit("mode")
 
         scanning = state == EXPLORE or (state == AGENT and self._agent_kind == A_SCAN)
         if scanning and self._ex_phase == "scan":
@@ -607,6 +647,55 @@ class Controller:
             self._agent_finish(AS_DONE if reason == "done" else AS_FAILED, reason)
             return idle
         return out
+
+    # --- teleop ---
+
+    def set_teleop(self, row) -> None:
+        """メインプロセスの teleop の共有メモリ（control_proc.TELEOP_N）"""
+        self._tele = tuple(float(x) for x in row)
+
+    def _teleop(self):
+        """手の指令に deadman と上限を当てる。(パン, チルト, ハンドル, 速さ)。guard・電池・clear は
+        step で guard を通した後（_teleop_safety）"""
+        car, ctl = self.car, self.ctl
+        t_recv, _seq, steer, speed, pan, tilt, ok = self._tele
+        lim = 0
+        if t_recv <= 0 or t_recv < self._tele_enter_ns:
+            # この teleop でまだ 1 度も受けていない。止まって、首は今のまま
+            lim, steer, speed, pan, tilt = _bit("deadman"), 0.0, 0.0, self.cmd.pan, self.cmd.tilt
+        elif self._now_ns - t_recv > TELEOP_DEADMAN_NS:
+            lim, speed = _bit("poll"), 0.0  # 問い合わせが届いていない。ハンドル・首は最後の値のまま
+        elif ok == 0:
+            lim, speed = _bit("deadman"), 0.0
+        elif ok < 0:
+            lim, speed = _bit("stopped"), 0.0
+        top = min(TELEOP_SPEED[1], ctl.max_speed)
+        speed = clip(speed, max(TELEOP_SPEED[0], -ctl.max_speed), top)
+        steer_max = min(TELEOP_STEER_MAX, car.steer_max)
+        steer = clip(steer, -steer_max, steer_max)
+        pan = clip(pan, car.pan_min, car.pan_max)
+        tilt = clip(tilt, max(TELEOP_TILT[0], car.tilt_min), min(TELEOP_TILT[1], car.tilt_max))
+        self.teleop_limit = lim
+        return pan, tilt, steer, speed
+
+    def _teleop_safety(self, speed: float) -> float:
+        """guard を通した後の速さに、電池と clear_cm を当てる（超音波では止めない）"""
+        if speed != 0.0 and not self.drive_ok:
+            self.teleop_limit |= _bit("battery")
+            return 0.0
+        if speed > 0.0:
+            if self.clear_state == CLEAR_VALUE and self.clear_cm < TELEOP_CLEAR_STOP_CM:
+                self.teleop_limit |= _bit("clear")
+                return 0.0
+            if self.clear_state != CLEAR_VALUE and speed > CLEAR_SKIP_SPEED:
+                # 分からない（null・古い・skip・欄が無い）：見えていないので遅く
+                self.teleop_limit |= _bit("clear")
+                return CLEAR_SKIP_SPEED
+        return speed
+
+    def clear_now(self) -> float:
+        """今使っている clear_cm（値が無い・古いなら -1）"""
+        return self.clear_cm if self.clear_state == CLEAR_VALUE else -1.0
 
     def _reshoot(self) -> None:
         """待っている station を同じ番号のまま撮り直す。scan_index も同じなので、撮れた向きは

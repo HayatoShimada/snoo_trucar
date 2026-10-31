@@ -34,13 +34,20 @@ MODE_N = 3
 #      step_station（直前の 1 歩はどの station の返事か。-1 は走っていない）, step_speed（前へ使った速さ）,
 #      step_driven_cm（実際に書いた速さで数えた距離）, 区切りごとの距離 × controller.MAX_SEGMENTS,
 #      agent の指令の id・様子（controller.AS_*）・止めた理由（controller.AGENT_REASONS の番号）・
-#      走った cm・かかった秒
-CMD_N = 26 + MAX_SEGMENTS + 5
+#      走った cm・かかった秒,
+#      teleop で弱めた理由（controller.TELEOP_LIMITS のビット）,
+#      今使っている clear_cm（無ければ -1）
+CMD_N = 26 + MAX_SEGMENTS + 5 + 2
 C_AGENT_ID = 26 + MAX_SEGMENTS  # cmd の中の agent の欄の始め（id, 様子, 理由, cm, 秒）
+C_TELEOP_LIMIT = C_AGENT_ID + 5
+C_CLEAR_CM = C_AGENT_ID + 6
 # agent: 問い合わせが通った時刻（monotonic_ns）, 指令の id, 種類（controller.A_*）, a, b, c, d
 #        （look: パン・チルト（無ければ nan）、move: ハンドル・cm・速さ・後ろへ。
 #        controller.set_agent）
 AGENT_N = 7
+# teleop: 返事を受けた時刻（monotonic_ns）, seq, ハンドル, 速さ, パン, チルト,
+#         ok（1: 使ってよい / 0: サーバーが古い・まだ無い / -1: サーバーが stop。teleop.py）
+TELEOP_N = 7
 # clear: t_capture_ns, cm, state（controller.CLEAR_*。0: 返事に欄が無い / 1: 値がある / 2: null /
 #        3: clear_skip。protocol.Reply）
 CLEAR_N = 3
@@ -59,7 +66,7 @@ def us_is_stale(now_ns: int, us_t_ns: int) -> bool:
 
 def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str,
         stop_event, clear_name: str | None = None, plan_name: str | None = None,
-        agent_name: str | None = None) -> None:  # fmt: skip
+        agent_name: str | None = None, teleop_name: str | None = None) -> None:  # fmt: skip
     ctl = cfg.control
     if ctl.cpu >= 0:
         try:
@@ -74,6 +81,8 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
     last_plan = 0
     agent_buf = SeqBuffer(AGENT_N, agent_name) if agent_name else None
     last_agent = 0
+    teleop_buf = SeqBuffer(TELEOP_N, teleop_name) if teleop_name else None
+    last_teleop = 0
     est = TargetEstimator(cfg.camera.hfov_deg, cfg.camera.vfov_deg, ctl.distance_k)
     controller = Controller(ctl, cfg.car)
     if clear_buf is not None:
@@ -129,6 +138,12 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                     last_agent = r[0]
                     controller.set_agent(r[1])
 
+            if teleop_buf is not None:
+                r = teleop_buf.read()
+                if r is not None and r[0] != last_teleop:
+                    last_teleop = r[0]
+                    controller.set_teleop(r[1])
+
             r = mode_buf.read()
             if r is not None and r[0] != last_mode:
                 last_mode = r[0]
@@ -160,6 +175,7 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
                 *controller.step_driven,
                 controller.agent_id, controller.agent_status, controller.agent_reason,
                 controller.agent_moved, controller.agent_secs,
+                controller.teleop_limit, controller.clear_now(),
             )  # fmt: skip
             out.write(out_vals)
 
@@ -192,4 +208,6 @@ def run(cfg: Config, meas_name: str, us_name: str, mode_name: str, cmd_name: str
             plan_buf.close()
         if agent_buf is not None:
             agent_buf.close()
+        if teleop_buf is not None:
+            teleop_buf.close()
         out.close()

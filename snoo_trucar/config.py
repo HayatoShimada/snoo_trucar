@@ -64,6 +64,8 @@ class ServerConfig:
     map_timeout_s: float = 20.0
     # エージェントの指令を地図のサーバー（map_url と同じ所）に 0.5 秒ごとに問い合わせる（agent.py）
     agent_poll: bool = True
+    # 手で操縦する指令を問い合わせる（teleop.py。teleop の間は 10 Hz、ほかは 1 Hz）
+    teleop_poll: bool = True
 
 
 @dataclass

@@ -76,6 +76,7 @@ class Runner:
         self.station = None
         self.voice = None  # 声（voice.py。実機のときだけ）
         self.agent = None  # エージェントの指令（agent.py。実機のときだけ）
+        self.teleop = None  # 手で操縦する（teleop.py。実機のときだけ）
         self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
@@ -104,6 +105,7 @@ class Runner:
         clear = SeqBuffer(control_proc.CLEAR_N)
         plan = SeqBuffer(control_proc.PLAN_N)
         agent = SeqBuffer(control_proc.AGENT_N)
+        teleop = SeqBuffer(control_proc.TELEOP_N)
         if self.resume is not None:
             r, elapsed = self.resume, self.resume_elapsed
             print(f"explore の続き: {r['session_id']} の station {r['next_station']} から"
@@ -116,7 +118,7 @@ class Runner:
         proc = ctx.Process(
             target=control_proc.run,
             args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name,
-                  agent.name),
+                  agent.name, teleop.name),
             name="snoo-control",
             daemon=True,
         )
@@ -211,6 +213,12 @@ class Runner:
                 supports = SUPPORTS + (["say"] if cfg.voice.enabled else [])
                 self.agent = AgentClient(self, agent, base_url(cfg.server.map_url), supports)
                 threads.append(self._thread("agent", self.agent.run, self.stop))
+            if cfg.server.teleop_poll:
+                from .teleop import TeleopClient
+                from .voice import base_url
+
+                self.teleop = TeleopClient(self, teleop, base_url(cfg.server.map_url))
+                threads.append(self._thread("teleop", self.teleop.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
 
@@ -242,7 +250,7 @@ class Runner:
                 self.link.close()
             if self.trace is not None:
                 self.trace.close()
-            for b in (meas, us, cmd, mode, clear, plan, agent):
+            for b in (meas, us, cmd, mode, clear, plan, agent, teleop):
                 b.close()
 
     def _thread(self, name: str, target, *args) -> threading.Thread:
@@ -414,6 +422,12 @@ class Runner:
             s += f" | {self.station.last}"
         if self.agent is not None and MODES[int(v[14])] == "agent" and self.agent.last:
             s += f" | {self.agent.last}"
+        if self.teleop is not None and MODES[int(v[14])] == "teleop":
+            from .control_proc import C_TELEOP_LIMIT
+            from .controller import limit_names
+
+            lim = ",".join(limit_names(int(v[C_TELEOP_LIMIT]))) or "-"
+            s += f" | {self.teleop.last} 弱めた={lim}"
         if int(v[17]) != OK:
             s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"
