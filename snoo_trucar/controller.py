@@ -14,6 +14,12 @@
   証拠として送るだけ）。止まったら自分で別の道を考えず、走った分を次の station の prev_step で返して撮る。
   サーバーに届かないときは送り直して待つ（StationClient）。snoo が explore_snoo_near_cm より近くに
   見えたら、止まってカメラで追うだけにする（臆病なので）
+- AGENT: エージェントの指令（look・move・scan・stop）を実行する（mode = agent。snoo_trucar#28、
+  rocm_opencv_server の docs/agent_robot.md）。自分では走らない。move は explore の 1 歩と同じ止め方
+  （clear_cm・stuck）に、guard・snoo が近い・電池・heartbeat・時間切れを足す
+- TELEOP: 人がブラウザ・ゲームパッドから手で操縦する（mode = teleop。snoo_trucar#27、
+  rocm_opencv_server の docs/teleop.md）。指令が 0.3 s 来なければ止まる（deadman）。guard・電池・
+  clear_cm（20 cm）はいつも効く。超音波では止めない（#26 と同じ）
 """
 
 from __future__ import annotations
@@ -26,12 +32,40 @@ from .config import CarConfig, ControlConfig
 from .estimator import TargetEstimator
 from .guard import OK, Guard
 
-SEARCH, TRACK, COAST, IDLE, MAP, EXPLORE = 0, 1, 2, 3, 4, 5
+SEARCH, TRACK, COAST, IDLE, MAP, EXPLORE, AGENT, TELEOP = 0, 1, 2, 3, 4, 5, 6, 7
 STATE_NAMES = {SEARCH: "SEARCH", TRACK: "TRACK", COAST: "COAST", IDLE: "IDLE", MAP: "MAP",
-               EXPLORE: "EXPLORE"}  # fmt: skip
+               EXPLORE: "EXPLORE", AGENT: "AGENT", TELEOP: "TELEOP"}  # fmt: skip
 # idle: 待機 / watch: 探してカメラで追う / keep: 距離を保つ（近づく・離れる）/ follow: 追いかける /
-# map: 部屋を撮る / explore: 部屋を動きながら撮る（共有メモリでは番号なので、足すときは後ろに）
-MODES = ("idle", "watch", "keep", "follow", "map", "explore")
+# map: 部屋を撮る / explore: 部屋を動きながら撮る / agent: エージェントの指令を実行する /
+# teleop: 手で操縦する（共有メモリでは番号なので、足すときは後ろに）
+MODES = ("idle", "watch", "keep", "follow", "map", "explore", "agent", "teleop")
+# agent の指令（control_proc の agent の共有メモリ）。種類・様子・止めた理由
+A_NONE, A_LOOK, A_MOVE, A_SCAN, A_STOP = 0, 1, 2, 3, 4
+AGENT_KINDS = ("", "look", "move", "scan", "stop")
+AS_NONE, AS_RUNNING, AS_DONE, AS_FAILED, AS_CANCELLED = 0, 1, 2, 3, 4
+AGENT_STATUS = ("", "running", "done", "failed", "cancelled")
+AGENT_REASONS = ("", "done", "clear", "clear_unknown", "stuck", "clear_skip", "guard", "snoo_near",
+                 "battery", "heartbeat", "stop", "button", "timeout", "mode")  # fmt: skip
+AGENT_HEARTBEAT_NS = 3_000_000_000  # 問い合わせがこれだけ通らなければ、動いている指令を止める
+AGENT_MAX_CM = 30.0  # move の上限（サーバーも確かめるが、Pi でももう一度収める）
+AGENT_MAX_SPEED = 10.0
+AGENT_LOOK_S = 0.5  # look で首を向けてから止まるのを待つ
+# teleop（docs/teleop.md）。上限はサーバーと同じものを Pi でももう一度
+TELEOP_SPEED = (-10.0, 15.0)
+TELEOP_STEER_MAX = 28.0
+TELEOP_TILT = (-20.0, 30.0)
+TELEOP_DEADMAN_NS = 300_000_000  # 最後に受けた返事がこれより古ければ止まる
+TELEOP_CLEAR_STOP_CM = 20.0
+# 手の指令より弱めた理由（cmd の teleop_limit のビット。問い合わせの limit に名前で返す）
+TELEOP_LIMITS = ("deadman", "poll", "stopped", "guard", "battery", "sonar", "clear", "mode")
+
+
+def limit_names(bits: int) -> list[str]:
+    return [n for i, n in enumerate(TELEOP_LIMITS) if int(bits) >> i & 1]
+
+
+def _bit(name: str) -> int:
+    return 1 << TELEOP_LIMITS.index(name)
 MAP_PANS = (-35.0, -25.0, -15.0, -5.0, 5.0, 15.0, 25.0, 35.0)
 # チルトは picar-x.conf の較正（picarx_cam_tilt_servo = 26.5）で 0° が水平。床・壁・家具の高さを撮る
 MAP_TILTS = (-15.0, 0.0, 15.0)
@@ -179,6 +213,22 @@ class Controller:
         self.low_passed = 0  # 前の版の「低い物を越えた回数」（今は越えない。prev_step では 0）
         self._now_ns = 0
         self.guard = Guard(ctl.guard, car.cm_s_per_speed)
+        # agent の指令（set_agent）。agent_* は control_proc が cmd に出す
+        # （メインプロセスが結果を書く）
+        self.agent_id, self.agent_status, self.agent_reason = 0, AS_NONE, 0
+        self.agent_moved, self.agent_secs = 0.0, 0.0
+        self._agent_kind, self._agent_t = A_NONE, 0.0
+        self._agent_hb_ns = 0  # メインプロセスの問い合わせが最後に通った時刻
+        self._agent_pose = (0.0, 0.0)  # look で向けた首の向き（指令の無い間もこの向き）
+        self._agent_end = 0.0  # move の時間切れ（秒）
+        self._agent_snoo_near = False
+        self._agent_seen = 0  # いちばん新しく見た指令の id
+        # teleop（set_teleop）: (返事を受けた時刻, seq, ハンドル, 速さ, パン, チルト, ok)。
+        # ok は 1: 使ってよい / 0: サーバーが古い（deadman）・まだ無い /
+        # -1: サーバーが stop と言った
+        self._tele = (0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self._tele_enter_ns = 0  # teleop に入った時刻（それより前に受けた指令は使わない）
+        self.teleop_limit = 0  # 弱めた理由（TELEOP_LIMITS のビット）
 
     def set_clear(self, state: int, cm: float, now_ns: int, t_capture_ns: int = 0) -> None:
         """state は CLEAR_*。t_capture_ns はその返事の画像を撮った時刻（age_clear で古さを見る）"""
@@ -216,11 +266,28 @@ class Controller:
         if mode not in MODES:
             raise ValueError(mode)
         if mode != self.mode:
+            if self.mode == "agent" and self.agent_status == AS_RUNNING:
+                self._agent_finish(AS_CANCELLED, "mode")  # USR・ほかのモードに替わった
+            if mode == "agent":
+                self._agent_pose = (self.cmd.pan, self.cmd.tilt)
+            if mode == "teleop" or self.mode == "teleop":
+                # 入ったとき・出たときは、速さ 0・ハンドル 0 から（前のモードの指令を持ち越さない）
+                self._tele_enter_ns = self._now_ns + 1
+                self.cmd.steer = self.cmd.speed = 0.0
             self.mode = mode
             self._map_t = 0.0
             self._search_t = 0.0
             self._arc_left = 0.0
             self._reset_explore()
+
+    def resume_explore(self, station: int, elapsed_s: float = 0.0) -> None:
+        """起動し直した後、同じセッションの続き（station 番号）から explore を始める（resume.py）。
+        まずその場で撮る。直前の 1 歩は分からないので、prev_step は無し（step_station = -1）。
+        elapsed_s は前のプロセスで探った時間（explore_max_s を延ばさない）"""
+        self.set_mode("explore")
+        self._reset_explore()
+        self._ex_stop = max(0, int(station))
+        self._ex_total = max(0.0, float(elapsed_s))
 
     def _reset_explore(self) -> None:
         """explore の状態をすべて始めに戻す。前の explore の 1 歩・待っている station・撮る予定が
@@ -269,6 +336,13 @@ class Controller:
             far = state != SEARCH and est.dist.x[0] > ctl.explore_snoo_near_cm
             if state == SEARCH or far:
                 state = EXPLORE
+        if self.mode == "teleop":
+            state = TELEOP  # snoo が見えていても追わない（人が操縦する）
+        if self.mode == "agent":
+            # snoo が見えていても追わない（指令の首の向きのまま）。近ければ move を止める（_agent）
+            near = est.valid and since < ctl.coast_s and est.dist.x[0] < ctl.explore_snoo_near_cm
+            self._agent_snoo_near = near
+            state = AGENT
         if state == TRACK and cmd.state == SEARCH:
             self._search_t = 0.0
             self._arc_left = 0.0
@@ -282,6 +356,10 @@ class Controller:
                 state = IDLE
         elif state == SEARCH:
             pan_goal, tilt_goal, steer, speed = self._search(dt)
+        elif state == AGENT:
+            pan_goal, tilt_goal, steer, speed = self._agent(dt)
+        elif state == TELEOP:
+            pan_goal, tilt_goal, steer, speed = self._teleop()
         elif state == EXPLORE:
             pan_goal, tilt_goal, steer, speed = self._explore(dt)
             if self.mode == "idle":  # 時間切れ
@@ -301,15 +379,23 @@ class Controller:
         # snoo のいない探索まで遊びに数えると、3 分で 10 分休んでしまう
         seen = est.valid and since < ctl.coast_s
         playing = self.mode in ("keep", "follow") or (
-            self.mode == "explore" and est.valid and since < ctl.lost_s
+            self.mode in ("explore", "agent", "teleop") and est.valid and since < ctl.lost_s
         )
+        asked = (steer, speed)
         steer, speed = self.guard.apply(
             playing, dt, steer, speed,
             est.dist.x[0] if seen else None, est.dist.x[1] if seen else None,
         )
         cmd.guard = self.guard.state
+        if state == TELEOP:
+            if (steer, speed) != asked or self.guard.state != OK:
+                self.teleop_limit |= _bit("guard")
+            speed = self._teleop_safety(speed)
+        else:
+            self.teleop_limit = _bit("mode")
 
-        if state == EXPLORE and self._ex_phase == "scan":
+        scanning = state == EXPLORE or (state == AGENT and self._agent_kind == A_SCAN)
+        if scanning and self._ex_phase == "scan":
             # 撮るために止まって向きを変えるときは、滑らかにせずすぐ書く（サーボは自分の速さで回る）
             cmd.pan = clip(pan_goal, car.pan_min, car.pan_max)
             cmd.tilt = clip(tilt_goal, car.tilt_min, car.tilt_max)
@@ -413,47 +499,211 @@ class Controller:
         return pan, ctl.search_tilt_deg, steer, speed
 
     def _explore(self, dt: float):
-        ctl = self.ctl
+        """explore を 1 回分進める。段階ごと：撮る（_scan_tick）→ 返事を待つ（_explore_plan）→
+        サーバーの 1 歩を走る（_step）。(パン, チルト, ハンドル, 速さ)"""
+        stop = (0.0, 0.0, 0.0, 0.0)
         self._ex_total += dt
-        if self._ex_total >= ctl.explore_max_s:
+        if self._ex_total >= self.ctl.explore_max_s:
             self.set_mode("idle")
-            return 0.0, 0.0, 0.0, 0.0
+            return stop
         self._ex_t += dt
         if self._ex_phase == "scan":
-            poses = self.scan_poses
-            if self._ex_sched_stop != self._ex_stop:
-                self._ex_sched_stop = self._ex_stop
-                self._ex_sched = scan_schedule(self.cmd.pan, self.cmd.tilt, poses)
-            i = bisect.bisect_right(self._ex_sched, self._ex_t)
-            if i < len(poses):
-                self.cmd.scan_index = self._ex_stop * len(poses) + i
-                return (*poses[i], 0.0, 0.0)
-            self._ex_stop += 1
-            self._ex_t, self._ex_moved = 0.0, 0.0
-            # 撮った分をメインプロセスがサーバーに送り、次の 1 歩をもらうまで止まって待つ
-            self._ex_phase, self.station_wait = "plan", self._ex_stop - 1
-            self.cmd.scan_index = -1
-            return 0.0, 0.0, 0.0, 0.0
-        if self._ex_phase == "plan":
-            self.cmd.scan_index = -1
-            p = self.plan
-            if p is None or int(p[0]) != self.station_wait:
-                # 返事を待つ。届かなければ StationClient が送り直す（Pi では道を決めない）
-                return 0.0, 0.0, 0.0, 0.0
-            action = int(p[1])
-            if action == PLAN_DONE:
-                self.station_wait = -1
-                self.set_mode("idle")  # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
-                return 0.0, 0.0, 0.0, 0.0
-            if action == PLAN_RESHOOT:
-                self._reshoot()
-                return 0.0, 0.0, 0.0, 0.0
-            if action != PLAN_MOVE:
-                return 0.0, 0.0, 0.0, 0.0  # 前の版の PLAN_FALLBACK などは待つのと同じ
-            self.station_wait = -1
-            self._start_step(p)
+            pose = self._scan_tick()
+            return (*pose, 0.0, 0.0) if pose is not None else stop
+        if self._ex_phase == "plan" and not self._explore_plan():
+            return stop
         self.cmd.scan_index = DRIVE_INDEX
         return self._step()
+
+    def _explore_plan(self) -> bool:
+        """撮った分を送ってサーバーの返事を待つ。1 歩を走り始めたら True"""
+        self.cmd.scan_index = -1
+        p = self.plan
+        if p is None or int(p[0]) != self.station_wait:
+            # 返事を待つ。届かなければ StationClient が送り直す（Pi では道を決めない）
+            return False
+        action = int(p[1])
+        if action == PLAN_DONE:
+            self.station_wait = -1
+            # 見ていない所が無い・電池が少ない など（理由はメインプロセスが出す）
+            self.set_mode("idle")
+            return False
+        if action == PLAN_RESHOOT:
+            self._reshoot()
+            return False
+        if action != PLAN_MOVE:
+            return False  # 前の版の PLAN_FALLBACK などは待つのと同じ
+        self.station_wait = -1
+        self._start_step(p)
+        return True
+
+    def _scan_tick(self):
+        """止まって首を振って撮る（explore と agent の scan）。今の向き (パン, チルト) を返す。
+        撮り終えたら None を返し、メインプロセスが送ってサーバーの返事が来るまで待つ（plan）"""
+        poses = self.scan_poses
+        if self._ex_sched_stop != self._ex_stop:
+            self._ex_sched_stop = self._ex_stop
+            self._ex_sched = scan_schedule(self.cmd.pan, self.cmd.tilt, poses)
+        i = bisect.bisect_right(self._ex_sched, self._ex_t)
+        if i < len(poses):
+            self.cmd.scan_index = self._ex_stop * len(poses) + i
+            return poses[i]
+        self._ex_stop += 1
+        self._ex_t, self._ex_moved = 0.0, 0.0
+        # 撮った分をメインプロセスがサーバーに送り、返事をもらうまで止まって待つ
+        self._ex_phase, self.station_wait = "plan", self._ex_stop - 1
+        self.cmd.scan_index = -1
+        return None
+
+    # --- agent ---
+
+    def set_agent(self, row) -> None:
+        """メインプロセスの agent の共有メモリ（control_proc.AGENT_N）:
+        (問い合わせが通った時刻, 指令の id, 種類 A_*, a, b, c, d)。id が替わったら新しい指令。
+        look: a = パン, b = チルト（無い欄は nan）。
+        move: a = ハンドル, b = cm, c = 速さ, d = 後ろへ（1）"""
+        self._agent_hb_ns = int(row[0])
+        cid, kind = int(row[1]), int(row[2])
+        if cid <= self._agent_seen:
+            return  # 前に見た指令（問い合わせが通った時刻だけ新しくなった）
+        self._agent_seen = cid  # 受けなかった指令も、あとで agent に入ったときに動かさない
+        if kind == A_STOP:
+            if self.agent_status == AS_RUNNING:
+                self._agent_finish(AS_CANCELLED, "stop")
+            self.agent_id, self._agent_kind, self.agent_status = cid, A_STOP, AS_DONE
+            self.agent_reason = 0
+            return
+        if self.mode != "agent" or self.agent_status == AS_RUNNING:
+            return  # メインプロセスが refused を書く（ここまで来ない）
+        self.agent_id, self._agent_kind, self.agent_status = cid, kind, AS_RUNNING
+        self.agent_reason, self.agent_moved, self.agent_secs, self._agent_t = 0, 0.0, 0.0, 0.0
+        car = self.car
+        a, b, c, d = (float(x) for x in row[3:7])
+        if kind == A_LOOK:
+            pan = self._agent_pose[0] if math.isnan(a) else clip(a, car.pan_min, car.pan_max)
+            tilt = self._agent_pose[1] if math.isnan(b) else clip(b, car.tilt_min, car.tilt_max)
+            self._agent_pose = (pan, tilt)
+        elif kind == A_MOVE:
+            steer = clip(a, -car.steer_max, car.steer_max)
+            cm = clip(abs(b), 0.0, AGENT_MAX_CM)
+            speed = clip(abs(c), 0.0, AGENT_MAX_SPEED)
+            if cm <= 0 or speed <= 0:
+                self._agent_finish(AS_FAILED, "done")  # メインプロセスが bad_params で断る
+                return
+            self._agent_end = cm / (speed * car.cm_s_per_speed) * 1.5 + 1.0
+            row = (-1, PLAN_MOVE, speed, 1, speed, steer, -cm if d > 0.5 else cm, -1.0)
+            self._start_step(row + (0.0,) * (PLAN_SEG_N * (MAX_SEGMENTS - 1)))
+        elif kind == A_SCAN:
+            self._ex_phase, self._ex_t, self.station_wait, self.plan = "scan", 0.0, -1, None
+        else:
+            self._agent_finish(AS_FAILED, "done")
+
+    def _agent_finish(self, status: int, reason: str) -> None:
+        self.agent_status, self.agent_reason = status, AGENT_REASONS.index(reason)
+        self.agent_secs = self._agent_t
+        if self._agent_kind == A_MOVE:
+            self.agent_moved = sum(self.step_driven)
+        self._agent_kind = A_NONE
+        self._ex_phase, self.station_wait = "idle", -1
+
+    def _agent(self, dt: float):
+        """agent の指令を 1 回分進める。(パン, チルト, ハンドル, 速さ)"""
+        idle = (*self._agent_pose, 0.0, 0.0)
+        if self.agent_status != AS_RUNNING:
+            return idle
+        self._agent_t += dt
+        if self._now_ns - self._agent_hb_ns > AGENT_HEARTBEAT_NS:
+            self._agent_finish(AS_FAILED, "heartbeat")  # エージェントが考えている間に走り続けない
+            return idle
+        kind = self._agent_kind
+        if kind == A_LOOK:
+            if self._agent_t >= AGENT_LOOK_S:
+                self._agent_finish(AS_DONE, "done")
+            return idle
+        if kind == A_SCAN:
+            self._ex_t += dt
+            if self._ex_phase == "scan":
+                pose = self._scan_tick()
+                if pose is not None:
+                    return (*pose, 0.0, 0.0)
+                return idle
+            p = self.plan  # 送ってサーバーの返事を待つ（返ってきた 1 歩は走らない）
+            if p is not None and int(p[0]) == self.station_wait:
+                if int(p[1]) == PLAN_RESHOOT:
+                    self._reshoot()
+                else:
+                    self._agent_finish(AS_DONE, "done")
+            return idle
+        # move: explore の 1 歩と同じ止め方に、guard・snoo・電池・時間切れを足す
+        why = None
+        if not self.drive_ok:
+            why = "battery"
+        elif self.guard.state != OK:
+            why = "guard"
+        elif self._agent_snoo_near:
+            why = "snoo_near"
+        elif self._agent_t > self._agent_end:
+            why = "timeout"
+        if why is not None:
+            self._agent_finish(AS_FAILED, why)
+            return idle
+        self._ex_t += dt
+        self.cmd.scan_index = DRIVE_INDEX
+        out = self._step()
+        if self._ex_phase != "step":  # 1 歩を終えた・止めた
+            reason = STOP_REASONS[self.last_step[1]]
+            self._agent_finish(AS_DONE if reason == "done" else AS_FAILED, reason)
+            return idle
+        return out
+
+    # --- teleop ---
+
+    def set_teleop(self, row) -> None:
+        """メインプロセスの teleop の共有メモリ（control_proc.TELEOP_N）"""
+        self._tele = tuple(float(x) for x in row)
+
+    def _teleop(self):
+        """手の指令に deadman と上限を当てる。(パン, チルト, ハンドル, 速さ)。guard・電池・clear は
+        step で guard を通した後（_teleop_safety）"""
+        car, ctl = self.car, self.ctl
+        t_recv, _seq, steer, speed, pan, tilt, ok = self._tele
+        lim = 0
+        if t_recv <= 0 or t_recv < self._tele_enter_ns:
+            # この teleop でまだ 1 度も受けていない。止まって、首は今のまま
+            lim, steer, speed, pan, tilt = _bit("deadman"), 0.0, 0.0, self.cmd.pan, self.cmd.tilt
+        elif self._now_ns - t_recv > TELEOP_DEADMAN_NS:
+            lim, speed = _bit("poll"), 0.0  # 問い合わせが届いていない。ハンドル・首は最後の値のまま
+        elif ok == 0:
+            lim, speed = _bit("deadman"), 0.0
+        elif ok < 0:
+            lim, speed = _bit("stopped"), 0.0
+        top = min(TELEOP_SPEED[1], ctl.max_speed)
+        speed = clip(speed, max(TELEOP_SPEED[0], -ctl.max_speed), top)
+        steer_max = min(TELEOP_STEER_MAX, car.steer_max)
+        steer = clip(steer, -steer_max, steer_max)
+        pan = clip(pan, car.pan_min, car.pan_max)
+        tilt = clip(tilt, max(TELEOP_TILT[0], car.tilt_min), min(TELEOP_TILT[1], car.tilt_max))
+        self.teleop_limit = lim
+        return pan, tilt, steer, speed
+
+    def _teleop_safety(self, speed: float) -> float:
+        """guard を通した後の速さに、電池と clear_cm を当てる（超音波では止めない）"""
+        if speed != 0.0 and not self.drive_ok:
+            self.teleop_limit |= _bit("battery")
+            return 0.0
+        if speed > 0.0:
+            if self.clear_state == CLEAR_VALUE and self.clear_cm < TELEOP_CLEAR_STOP_CM:
+                self.teleop_limit |= _bit("clear")
+                return 0.0
+            if self.clear_state != CLEAR_VALUE and speed > CLEAR_SKIP_SPEED:
+                # 分からない（null・古い・skip・欄が無い）：見えていないので遅く
+                self.teleop_limit |= _bit("clear")
+                return CLEAR_SKIP_SPEED
+        return speed
+
+    def clear_now(self) -> float:
+        """今使っている clear_cm（値が無い・古いなら -1）"""
+        return self.clear_cm if self.clear_state == CLEAR_VALUE else -1.0
 
     def _reshoot(self) -> None:
         """待っている station を同じ番号のまま撮り直す。scan_index も同じなので、撮れた向きは

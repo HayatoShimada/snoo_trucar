@@ -116,3 +116,11 @@ explore で止まって撮るたびに（station）、`POST http://192.168.0.248
   その後は 1 枚でもあれば送り、0 枚のまま・まだ断られるなら探索をやめて待機に戻る。撮れなかった訳（カメラの最後のコマの古さ・
   書き込みの失敗・撮る前に次の向きへ替わった向きの数）をログに出す
 - 地図は `GET http://192.168.0.248:8720/v1/snoo/map/<session_id>/topdown.png`
+
+## エージェントの指令・声（HTTP）
+
+agent モード（USR 5 回・`--mode agent`）の指令（look・move・scan・stop）と heartbeat、声（say/next）は
+rocm_opencv_server の `docs/agent_robot.md` のとおり（`snoo_trucar/agent.py`・`snoo_trucar/voice.py`）。
+agent の scan は `"mode": "agent"`・`session_id` は `agent_日時` で上の station と同じく送り、`prev_step` には
+前の scan からの agent の move を書く（同じ向きだけなら `segments` に並べ、向きが混じった・指令の無い間に
+動いたなら `{"stop_reason": "agent"}` だけ）。

@@ -52,7 +52,7 @@ def battery_state(volts: float | None, low_v: float) -> tuple[str, bool]:
 class Runner:
     def __init__(self, cfg: Config, sim: bool = False, seconds: float | None = None,
                  quiet: bool = False, seed: int = 0, buttons: bool = True,
-                 camera_file: str | None = None):  # fmt: skip
+                 camera_file: str | None = None, resume: bool = False):  # fmt: skip
         self.cfg = cfg
         self.sim = sim
         self.seconds = seconds
@@ -64,7 +64,10 @@ class Runner:
         self.last_us: float | None = None
         self.last_us_t_ns = 0  # 超音波が最後に測れた時刻（monotonic_ns）
         self.stop = threading.Event()
-        self.history: list[tuple] = []  # (t, state, bearing_est, dist_est, bearing_true, dist_true)
+        # (t, state, bearing_est, dist_est, bearing_true, dist_true, …)。
+        # シミュレーションのときだけ溜める
+        # （実機で 200 Hz に溜めると 1 時間で約 270 MB。#21 のレビューの 4）
+        self.history: list[tuple] = []
         self.world = None
         self.link = None
         self.camera = None
@@ -74,9 +77,27 @@ class Runner:
         self.motion = None  # MotionWatch（実機のときだけ）
         self.recorder = None
         self.station = None
+        self.voice = None  # 声（voice.py。実機のときだけ）
+        self.agent = None  # エージェントの指令（agent.py。実機のときだけ）
+        self.teleop = None  # 手で操縦する（teleop.py。実機のときだけ）
         self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
+        # explore の続き（resume.py）。resume なら、起動したときに explore.json を見て戻る
+        from .resume import ExploreState
+
+        state = cfg.explore_state
+        self.explore_state = ExploreState(Path(state).expanduser() if state and not sim else None)
+        self.resume = self.explore_state.load() if resume else None
+        self.resume_elapsed = 0.0
+        if self.resume is not None:
+            self.resume_elapsed = max(0.0, time.time() - self.explore_state.started)
+            if self.resume_elapsed >= cfg.control.explore_max_s:
+                print("explore の続きは explore_max_s を過ぎているので戻らない", flush=True)
+                self.resume = None
+                self.explore_state.clear()
+            else:
+                cfg.control.mode = "explore"
 
     def run(self) -> None:
         cfg = self.cfg
@@ -86,12 +107,21 @@ class Runner:
         self.mode_buf = mode = SeqBuffer(control_proc.MODE_N)
         clear = SeqBuffer(control_proc.CLEAR_N)
         plan = SeqBuffer(control_proc.PLAN_N)
-        self.set_mode(cfg.control.mode)
+        agent = SeqBuffer(control_proc.AGENT_N)
+        teleop = SeqBuffer(control_proc.TELEOP_N)
+        if self.resume is not None:
+            r, elapsed = self.resume, self.resume_elapsed
+            print(f"explore の続き: {r['session_id']} の station {r['next_station']} から"
+                  f"（{elapsed:.0f} 秒探った後）。まずその場で撮る", flush=True)  # fmt: skip
+            self.mode_buf.write((MODES.index("explore"), int(r["next_station"]), elapsed))
+        else:
+            self.set_mode(cfg.control.mode)
         ctx = mp.get_context("fork")
         proc_stop = ctx.Event()
         proc = ctx.Process(
             target=control_proc.run,
-            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name),
+            args=(cfg, meas.name, us.name, mode.name, cmd.name, proc_stop, clear.name, plan.name,
+                  agent.name, teleop.name),
             name="snoo-control",
             daemon=True,
         )
@@ -150,6 +180,8 @@ class Runner:
 
             self.link.on_clear = on_clear
             recorder = self.recorder = MapRecorder(Path(cfg.map_dir).expanduser())
+            if self.resume is not None:
+                recorder.resume(self.resume["session_id"])
 
             from .motion import MotionWatch, shrink
 
@@ -170,12 +202,30 @@ class Runner:
             threads.append(self._thread("カメラ", camera_loop, camera, self.link, self.stop, on_frame))
             from .station import StationClient
 
-            self.station = StationClient(self, plan)
+            self.station = StationClient(self, plan, self.explore_state)
             threads.append(self._thread("station", self.station.run, self.stop))
+            if cfg.voice.enabled:
+                from .voice import Voice, base_url
+
+                self.voice = Voice(self, cfg.voice, base_url(cfg.server.map_url))
+                threads.append(self._thread("声", self.voice.run, self.stop))
+            if cfg.server.agent_poll:
+                from .agent import SUPPORTS, AgentClient
+                from .voice import base_url
+
+                supports = SUPPORTS + (["say"] if cfg.voice.enabled else [])
+                self.agent = AgentClient(self, agent, base_url(cfg.server.map_url), supports)
+                threads.append(self._thread("agent", self.agent.run, self.stop))
+            if cfg.server.teleop_poll:
+                from .teleop import TeleopClient
+                from .voice import base_url
+
+                self.teleop = TeleopClient(self, teleop, base_url(cfg.server.map_url))
+                threads.append(self._thread("teleop", self.teleop.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
 
-                panel = Panel(self.set_mode, self.current_mode)
+                panel = Panel(self.button_mode, self.current_mode)
                 threads.append(self._thread("ボタン", panel.run, self.stop))
         threads.append(self._thread("超音波", self._ultrasonic_loop, car, us))
         threads.append(self._thread("電池", self._battery_loop, car))
@@ -203,7 +253,7 @@ class Runner:
                 self.link.close()
             if self.trace is not None:
                 self.trace.close()
-            for b in (meas, us, cmd, mode, clear, plan):
+            for b in (meas, us, cmd, mode, clear, plan, agent, teleop):
                 b.close()
 
     def _thread(self, name: str, target, *args) -> threading.Thread:
@@ -221,7 +271,16 @@ class Runner:
             self.thread_died = name
 
     def set_mode(self, mode: str) -> None:
-        self.mode_buf.write((MODES.index(mode),))
+        if mode != "explore":
+            # USR の長押しなどで explore をやめた。起動し直しても戻らない
+            self.explore_state.clear()
+        self.mode_buf.write((MODES.index(mode), -1.0, 0.0))
+
+    def button_mode(self, mode: str) -> None:
+        """USR ボタン。長押し（idle）は、agent の指令も取り消す"""
+        self.set_mode(mode)
+        if mode == "idle" and self.agent is not None:
+            self.agent.on_button()
 
     def current_mode(self) -> str:
         return MODES[int(self.last_cmd[14])] if self.last_cmd is not None else self.cfg.control.mode
@@ -347,7 +406,9 @@ class Runner:
             time.sleep(max(0.0, nxt - time.monotonic()))
 
     def _record(self, t: float, v) -> None:
-        truth = self.world.truth() if self.world is not None else (float("nan"),) * 2
+        if self.world is None:
+            return
+        truth = self.world.truth()
         self.history.append((t, int(v[5]), v[7], v[8], *truth, v[3], v[2], v[6]))
 
     def _status(self, v) -> str:
@@ -364,6 +425,14 @@ class Runner:
             s += f" | 画像の動き={m.diff:.1f}（止まっているとき {m.noise:.1f}）" + (" 詰まった" if m.stuck else "")
         if self.station is not None and MODES[int(v[14])] == "explore" and self.station.last:
             s += f" | {self.station.last}"
+        if self.agent is not None and MODES[int(v[14])] == "agent" and self.agent.last:
+            s += f" | {self.agent.last}"
+        if self.teleop is not None and MODES[int(v[14])] == "teleop":
+            from .control_proc import C_TELEOP_LIMIT
+            from .controller import limit_names
+
+            lim = ",".join(limit_names(int(v[C_TELEOP_LIMIT]))) or "-"
+            s += f" | {self.teleop.last} 弱めた={lim}"
         if int(v[17]) != OK:
             s += f" | 安全={GUARD_NAMES[int(v[17])]}"
         s += f" | 超音波={self.last_us or -1:.0f}cm loop={v[10]:6.0f}Hz p99遅れ={v[11]:5.1f}us 超過={int(v[12])}"

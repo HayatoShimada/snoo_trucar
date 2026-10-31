@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .guard import GuardConfig
+from .voice import VoiceConfig
 
 DEFAULT_PATH = Path.home() / ".config" / "snoo_trucar" / "config.toml"
 
@@ -61,6 +62,10 @@ class ServerConfig:
     # 探索の地図のサーバー（撮った分を送ると、次の 1 歩を返す。docs/PROTOCOL.md）
     map_url: str = "http://192.168.0.248:8720/v1/snoo/map/station"
     map_timeout_s: float = 20.0
+    # エージェントの指令を地図のサーバー（map_url と同じ所）に 0.5 秒ごとに問い合わせる（agent.py）
+    agent_poll: bool = True
+    # 手で操縦する指令を問い合わせる（teleop.py。teleop の間は 10 Hz、ほかは 1 Hz）
+    teleop_poll: bool = True
 
 
 @dataclass
@@ -188,11 +193,16 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     car: CarConfig = field(default_factory=CarConfig)
+    # 声（voice.py）。設定ファイルでは [voice]
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     # map で撮った画像の置き場所（map_日時/ に画像と scan.json）
     map_dir: str = "~/captures/snoo_map"
     seen_dir: str = "~/captures/snoo_seen"  # 追い始めたときの画像と箱
     # フレームごとの区間の時刻（trace.py）を JSON Lines で残すディレクトリ。空なら残さない（集計は出す）
     trace_dir: str = ""
+    # explore の続き（resume.py）。起動し直したとき、これが 10 分より新しければ
+    # 同じセッションで続ける。空なら使わない
+    explore_state: str = "~/.local/state/snoo_trucar/explore.json"
 
 
 # 前の版にあった項目。Pi の config.toml に残っていても止めずに無視する（超音波で止まる・Pi だけで探る
