@@ -2,7 +2,8 @@
 
 制御プロセスが撮り終えると cmd の station_wait に station の番号が出る。ここでその station の画像
 （前の station から走ってくる間の分も）と scan.json の形のメタデータを POST し、返事を plan に書く。
-返事が来ない・失敗したら PLAN_FALLBACK を書き、制御プロセスは Pi だけで次を決める。仕様は docs/PROTOCOL.md。
+道はサーバーがすべて決める（区切りごとに前・後ろ。"gear_segments"）。返事が来ない・失敗したら、
+RETRY_S おきに送り直す（制御プロセスは止まって待つ。Pi では道を決めない）。仕様は docs/PROTOCOL.md。
 """
 
 from __future__ import annotations
@@ -12,8 +13,37 @@ import threading
 import time
 
 from .control_proc import PLAN_N
-from .controller import MAX_SEGMENTS, PLAN_DONE, PLAN_FALLBACK, PLAN_MOVE, STOP_REASONS
+from .controller import MAX_SEGMENTS, PLAN_DONE, PLAN_MOVE, PLAN_SEG_N, STOP_REASONS
 from .errlog import ErrorLog
+
+# 地図のサーバーに届かない・失敗したとき、送り直すまでの秒
+RETRY_S = 3.0
+# サーバーに伝える、Pi ができること
+SUPPORTS = ["reverse", "segments", "long_step", "gear_segments"]
+
+
+def parse_move(ans: dict) -> tuple[list[tuple[float, float, bool, float | None]], float, float]:
+    """move の返事から ([(ハンドル°, cm, 後ろへか, clear_cm の下限 or None)], 前の速さ, 後ろの速さ)。
+    区切りの reverse が無ければ返事の reverse（前の版のサーバー）。"""
+    back_all = bool(ans.get("reverse"))
+    speed = abs(float(ans["speed"]))
+    back_speed = abs(float(ans.get("reverse_speed", speed)))
+    raw = ans.get("segments") or [{"steer_deg": ans["steer_deg"], "distance_cm": ans["distance_cm"]}]
+    segs = []
+    for x in raw[:MAX_SEGMENTS]:
+        mc = x.get("min_clear_cm")
+        segs.append((float(x["steer_deg"]), abs(float(x["distance_cm"])), bool(x.get("reverse", back_all)),
+                     float(mc) if mc is not None else None))  # fmt: skip
+    return segs, speed, back_speed
+
+
+def plan_row(k: int, segs, speed: float, back_speed: float) -> tuple:
+    """plan の共有メモリの 1 行（control_proc.PLAN_N）"""
+    flat = []
+    for steer, cm, back, mc in segs:
+        flat += [steer, -cm if back else cm, mc if mc is not None else -1.0]
+    flat += [0.0] * (PLAN_SEG_N * (MAX_SEGMENTS - len(segs)))
+    return (k, PLAN_MOVE, speed, len(segs), back_speed, *flat)
 
 
 class StationClient:
@@ -22,10 +52,11 @@ class StationClient:
         self.plan_buf = plan_buf
         self.cfg = runner.cfg
         self._posted = -1
+        self._retry_at = 0.0
         self._session = None
-        # 返ってきた 1 歩を station ごとに ([(steer, cm)], speed)。どれを走ったかは制御プロセスが
-        # step_station で伝える（25 s 待って Pi だけで決めた後に遅れて来た返事を、走ったことにしない）
-        self._moves: dict[int, tuple[list[tuple[float, float]], float]] = {}
+        # 返ってきた 1 歩を station ごとに [(steer, cm, 後ろへか, min_clear)]。どれを走ったかは制御プロセスが
+        # step_station で伝える
+        self._moves: dict[int, list[tuple[float, float, bool, float | None]]] = {}
         self.last = ""  # 状態の行に出す
 
     def run(self, stop: threading.Event) -> None:
@@ -33,7 +64,7 @@ class StationClient:
         while not stop.is_set():
             try:
                 self._once()
-            except Exception as e:  # 送れなかった station は、制御プロセスが 25 s 待って Pi だけで決める
+            except Exception as e:  # 送れなかった station は、RETRY_S おきに送り直す
                 errors(e)
             stop.wait(0.1)
 
@@ -44,11 +75,14 @@ class StationClient:
             if self._session != rec.dir.name:
                 self._session, self._posted, self._moves = rec.dir.name, -1, {}
             k = int(v[18])
-            if k >= 0 and k != self._posted:
+            if k >= 0 and k != self._posted and time.monotonic() >= self._retry_at:
                 self._posted = k
-                self._post(k, v, rec)
+                if not self._post(k, v, rec):
+                    # 届かない・失敗：制御プロセスは待ち続けるので、少しして同じ station を送り直す
+                    self._posted, self._retry_at = -1, time.monotonic() + RETRY_S
 
-    def _post(self, k: int, v, rec) -> None:
+    def _post(self, k: int, v, rec) -> bool:
+        """送って返事を plan に書く。返事を書けたら True"""
         entries = [dict(e) for e in list(rec.entries) if e.get("station") == k]
         link = getattr(self.runner, "link", None)
         if link is not None:
@@ -61,34 +95,35 @@ class StationClient:
         prev = None
         if k > 0:
             secs, reason = float(v[19]), STOP_REASONS[int(v[20])]
-            move = self._moves.get(int(v[23])) if len(v) > 28 and int(v[23]) >= 0 else None
-            if move is not None:
-                segs = move[0]
-                speed = float(v[24])  # 上限（explore_speed）で抑えた後の、実際に使った速さ
+            segs = self._moves.get(int(v[23])) if int(v[23]) >= 0 else None
+            if segs is not None:
+                speed = float(v[24])  # 上限（explore_speed）で抑えた後の、前へ使った速さ
                 # 区切りは実際に走った所まで（途中で止めたら、その区切りは止まった所まで）。
                 # 距離は guard・電池を通した後の速さで数えたもの（速さ × 秒では、待った間も進んだことになる）
-                driven = [float(x) for x in v[26:29]]
-                done = [(s, round(d, 1)) for (s, _), d in zip(segs, driven, strict=False) if d > 0.05]
-                done = done or [(segs[0][0], 0.0)]
-                # steer_deg は最後に走った区切りのハンドル
-                prev = {"steer_deg": done[-1][0], "speed": abs(speed), "reverse": speed < 0,
-                        "segments": [{"steer_deg": s, "distance_cm": d} for s, d in done],
+                driven = [float(x) for x in v[26 : 26 + MAX_SEGMENTS]]
+                done = [(s_, round(d, 1), b) for (s_, _, b, _), d in zip(segs, driven, strict=False)
+                        if d > 0.05]  # fmt: skip
+                done = done or [(segs[0][0], 0.0, segs[0][2])]
+                # steer_deg は最後に走った区切りのハンドル。reverse は全部が後ろへのとき（前の版の形）
+                prev = {"steer_deg": done[-1][0], "speed": abs(speed), "reverse": all(b for *_, b in done),
+                        "segments": [{"steer_deg": s_, "distance_cm": d, "reverse": b} for s_, d, b in done],
                         "seconds": round(secs, 2),
                         "est_distance_cm": round(float(v[25]), 1),
                         "stop_reason": reason,
                         "low_obstacle_passed": int(v[22])}  # fmt: skip
-            else:
-                prev = {"stop_reason": "local"}  # 前の 1 歩は Pi だけで決めた
+        us = self.runner.last_us
         meta = {"schema_version": 2, "camera": "picarx-ov5647", "tilt_offset_deg": 0.0,
                 "mode": "explore", "frames": entries, "session_id": self._session, "station_id": k,
                 "prev_step": prev, "battery_v": self.runner.battery_v,
-                "ultrasonic_cm": self.runner.last_us,
+                "ultrasonic_cm": us,
                 "camera_height_cm": self.cfg.camera.height_cm,
-                "supports": ["reverse", "segments", "long_step"]}  # fmt: skip
+                "supports": SUPPORTS}  # fmt: skip
+        if us is not None:
+            # 測れたときだけ、測った時刻を付ける（地図の弱い証拠にだけ使う）
+            meta["ultrasonic"] = {"cm": us, "t_ns": int(getattr(self.runner, "last_us_t_ns", 0))}
         t0 = time.monotonic()
-        plan = (k, PLAN_FALLBACK) + (0.0,) * (PLAN_N - 2)
         try:
-            import requests  # 無ければ Pi だけで決める（下の except）
+            import requests
 
             files = [("images", (e["file"], (rec.dir / e["file"]).read_bytes(), "image/jpeg"))
                      for e in entries]  # fmt: skip
@@ -98,27 +133,25 @@ class StationClient:
                 raise RuntimeError(f"{r.status_code} {r.text[:200]}")
             ans = r.json()
             if ans.get("action") == "move":
-                speed = abs(float(ans["speed"]))
-                if ans.get("reverse"):
-                    speed = -speed  # 下がる（plan では速さの符号で伝える）
-                segs = ans.get("segments") or [{"steer_deg": ans["steer_deg"], "distance_cm": ans["distance_cm"]}]
-                segs = [(float(s["steer_deg"]), float(s["distance_cm"])) for s in segs[:MAX_SEGMENTS]]
-                flat = [x for s in segs for x in s] + [0.0] * (2 * (MAX_SEGMENTS - len(segs)))
-                plan = (k, PLAN_MOVE, speed, len(segs), *flat)
-                self._moves[k] = (segs, speed)
-                desc = " → ".join(f"ハンドル{s:+.0f}° {d:.0f}cm" for s, d in segs)
-                self.last = (f"station {k}: 次は{'（下がる）' if speed < 0 else ''} {desc} "
-                             f"位置={ans.get('pose')} 目標={ans.get('target')}")  # fmt: skip
+                segs, speed, back_speed = parse_move(ans)
+                plan = plan_row(k, segs, speed, back_speed)
+                self._moves[k] = segs
+                desc = " → ".join(f"{'後ろ' if b else '前'} ハンドル{s_:+.0f}° {d:.0f}cm" for s_, d, b, _ in segs)
+                self.last = f"station {k}: 次は {desc} 位置={ans.get('pose')} 目標={ans.get('target')}"
             elif ans.get("action") == "done":
                 plan = (k, PLAN_DONE) + (0.0,) * (PLAN_N - 2)
                 self.last = f"station {k}: 終わり（{ans.get('reason')}）"
             else:
                 raise RuntimeError(f"知らない返事: {ans}")
-        except Exception as e:  # 届かない・失敗 → Pi だけで決める
-            self.last = f"station {k}: 地図のサーバーに届かない（{type(e).__name__}: {str(e)[:80]}）→ Pi だけで決める"
+        except Exception as e:  # 届かない・失敗 → 送り直して待つ（Pi では道を決めない）
+            self.last = (f"station {k}: 地図のサーバーに届かない（{type(e).__name__}: {str(e)[:80]}）"
+                         f"→ {RETRY_S:.0f} 秒後に送り直す")  # fmt: skip
+            print(self.last, flush=True)
+            return False
         if rec.dir is None or rec.dir.name != self._session:
             # 返事を待つ間に explore をやめた・始め直した。前の explore の 1 歩は渡さない
             print(f"station {k}: 返事の前に explore が替わったので捨てる", flush=True)
-            return
+            return True
         self.plan_buf.write(plan)
         print(f"{self.last}（{len(entries)} 枚、{time.monotonic() - t0:.1f}s）", flush=True)
+        return True

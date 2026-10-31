@@ -106,8 +106,8 @@ def test_controller_modes():
     cmd = c.step(est, S, 1e-3, None)
     assert cmd.speed < 0 and cmd.steer < 0  # 近すぎる → 逆に切って下がる
     _seen(est, S, 0.0, 300.0)
-    cmd = c.step(est, S, 1e-3, ctl.stop_distance_cm - 1)
-    assert cmd.speed <= 0  # 正面に障害物
+    cmd = c.step(est, S, 1e-3, 5.0)
+    assert cmd.speed > 0  # 超音波では止まらない（当てにならない。前は clear_cm と guard で見る）
 
     c, ctl = _controller("follow")
     _seen(est, S, 0.0, 30.0)
@@ -334,14 +334,14 @@ def test_controller_turns_the_body_even_inside_the_distance_band():
     from snoo_trucar.controller import ego_yaw_rate
 
     controller, ctl = _controller("keep")
-    steer, speed = controller._approach(25.0, ctl.keep_distance_cm, None)
+    steer, speed = controller._approach(25.0, ctl.keep_distance_cm)
     assert speed == ctl.creep_speed and steer > 0
     # 右へ回る向きで、速さによらず帯域は heading_hz（角速度 = 2π f × 方位）
     rate = ego_yaw_rate(steer, speed, controller.car)
     want = math.degrees(2 * math.pi * ctl.heading_hz * math.radians(25.0))
     assert rate == pytest.approx(want, rel=0.05)
     # 正面なら止まったまま
-    assert controller._approach(2.0, ctl.keep_distance_cm, None) == (0.0, 0.0)
+    assert controller._approach(2.0, ctl.keep_distance_cm) == (0.0, 0.0)
 
 
 def test_bench_keeps_track_of_a_circling_snoo():
@@ -434,23 +434,21 @@ def test_play_stress_in_reply():
     assert parse_reply(make_reply(1, 2, 3.0, [det])).boxes[0].stress is None
 
 
-def test_explore_scans_drives_and_turns():
-    from snoo_trucar.controller import DRIVE_INDEX, EXPLORE, EXPLORE_PANS, EXPLORE_TILTS
+def test_explore_scans_then_waits_for_the_server():
+    """止まって撮り、サーバーの返事を待つ。返事が来なければ待ち続ける（Pi では道を決めない）"""
+    from snoo_trucar.controller import EXPLORE, EXPLORE_PANS, EXPLORE_TILTS, scan_schedule
 
     est = TargetEstimator(53.5, 41.4, 33.0)
     c, ctl = _controller("explore")
-    ctl.explore_server = False  # Pi だけで決める探索
     dt = 0.01
     t = [0.0]
 
-    def run(seconds, us):
+    def run(seconds, us=None):
         out = []
         for _ in range(int(seconds / dt)):
             t[0] += dt
             out.append(dataclasses.replace(c.step(est, S + int(t[0] * S), dt, us)))  # step は同じものを返す
         return out
-
-    from snoo_trucar.controller import scan_schedule
 
     n_poses = len(EXPLORE_PANS) * len(EXPLORE_TILTS)
     scan_s = scan_schedule(0.0, 0.0)[-1]
@@ -458,34 +456,28 @@ def test_explore_scans_drives_and_turns():
     cmds = run(scan_s - 0.05, 200.0)
     assert all(x.state == EXPLORE and x.speed == 0 for x in cmds)  # 止まって撮る
     assert {x.scan_index for x in cmds} == set(range(n_poses))
-    cmds = run(0.5, 200.0)
-    assert cmds[-1].speed > 0 and cmds[-1].scan_index == DRIVE_INDEX  # 前が空いていれば進む
-    # 前が塞がった → 切り返しで回る（ハンドルを切って下がる → 逆に切って進む）
-    x = run(0.1, 40.0)[-1]
-    assert x.speed < 0 and abs(x.steer) == c.car.steer_max
-    back_steer = x.steer
-    x = run(ctl.explore_turn_s, 60.0)[-1]  # 進む間は 50 cm 以上空いていれば進む
-    assert x.speed > 0 and x.steer == -back_steer
-    # 前が空いたら、撮り直さずにそのまま進む
-    cmds = run(ctl.explore_turn_s + 0.5, 200.0)
-    assert cmds[-1].speed > 0 and cmds[-1].steer == 0
-    cmds = run(ctl.explore_step_cm / (ctl.explore_speed * c.car.cm_s_per_speed) + 0.1, 200.0)
-    assert cmds[-1].speed == 0 and cmds[-1].scan_index == n_poses  # 次の場所で撮り始める
-    # -1（反響なし）は、少し前まで測れていたなら遠くまで空いているとみなして進む
-    c2, _ = _controller("explore")
-    c2._ex_us_at = 0.0
-    c2._ex_phase, c2._ex_t = "check", 1.0
-    assert c2.step(est, S, dt, None).speed == 0 and c2._ex_phase == "drive"
-    # 超音波がずっと測れなければ、前にも後ろにも動かない
-    c3, _ = _controller("explore")
-    for k in range(int(3 * scan_s / dt)):
-        assert c3.step(est, S + int(k * dt * S), dt, None).speed == 0
+    cmds = run(40.0)  # 返事が来ない：止まったまま待つ
+    assert all(x.speed == 0 for x in cmds) and c._ex_phase == "plan" and c.station_wait == 0
     # snoo が遠くにいても探索は続ける。近くに見えたら止まってカメラで追うだけ
     _seen(est, S + int(t[0] * S), 10.0, 300.0)
-    assert c.step(est, S + int(t[0] * S), dt, 200.0).state == EXPLORE
+    assert c.step(est, S + int(t[0] * S), dt, None).state == EXPLORE
     _seen(est, S + int(t[0] * S), 10.0, 100.0)
-    x = c.step(est, S + int(t[0] * S), dt, 200.0)
+    x = c.step(est, S + int(t[0] * S), dt, None)
     assert x.state == TRACK and x.speed == 0 and c.mode == "explore"
+
+
+def test_scan_poses_follow_the_config_and_the_pan_limits():
+    from snoo_trucar.controller import EXPLORE_POSES, scan_poses
+
+    c, ctl = _controller("explore")
+    assert c.scan_poses == EXPLORE_POSES  # 既定は今までと同じ
+    ctl.explore_scan_tilts = [0.0, -15.0]
+    ctl.explore_scan_pans = [[-70, -35, 0, 35, 70], [-35, 0, 35]]
+    wide = scan_poses(ctl.explore_scan_tilts, ctl.explore_scan_pans, -35.0, 35.0)
+    # 首の範囲（±35°）を超えるパンは端にまとめる。段ごとに折り返す
+    assert wide == ((-35.0, 0.0), (0.0, 0.0), (35.0, 0.0), (35.0, -15.0), (0.0, -15.0), (-35.0, -15.0))
+    wide = scan_poses(ctl.explore_scan_tilts, ctl.explore_scan_pans, -70.0, 70.0)
+    assert [p for p, _ in wide[:5]] == [-70.0, -35.0, 0.0, 35.0, 70.0]
 
 
 def test_map_recorder_explore_records_while_driving(tmp_path, monkeypatch):
@@ -537,15 +529,19 @@ def test_motion_watch_notices_when_the_image_stops_moving():
     assert not w.feed(t + 4.0, frame(60), False)  # 止めたら解く
 
 
-def test_explore_backs_off_when_stuck():
+def test_explore_stops_the_step_when_stuck():
+    """走らせているのに画像が動かない → その 1 歩をやめて撮る（自分で下がって向きを変えない）"""
+    from snoo_trucar.controller import PLAN_MOVE, STOP_REASONS
+
     est = TargetEstimator(53.5, 41.4, 33.0)
     c, ctl = _controller("explore")
-    c._ex_us_at = 0.0
-    c._ex_phase, c._ex_t = "drive", 0.0
-    assert c.step(est, S, 0.01, 200.0).speed > 0
-    c.stuck = True  # 進めていない
-    x = c.step(est, S, 0.01, 200.0)
-    assert x.speed < 0 and c._ex_phase == "back"
+    c.set_clear(1, 100.0, S, S)
+    c._ex_phase, c.station_wait = "plan", 0
+    c.plan = (0, PLAN_MOVE, 12.0, 1, 8.0, 0.0, 40.0, -1.0) + (0.0,) * 12
+    assert c.step(est, S, 0.01, None).speed > 0
+    c.stuck = True
+    x = c.step(est, S, 0.01, None)
+    assert x.speed == 0 and c._ex_phase == "scan" and STOP_REASONS[c.last_step[1]] == "stuck"
 
 
 def test_sno2_header_and_clear_cm():
@@ -566,63 +562,58 @@ def test_sno2_header_and_clear_cm():
 
 
 def test_explore_uses_image_clearance():
+    from snoo_trucar.controller import PLAN_MOVE, STOP_REASONS
+
     est = TargetEstimator(53.5, 41.4, 33.0)
     c, ctl = _controller("explore")
-    c._ex_us_at = 0.0
-    c._ex_phase = "drive"
-    c.set_clear(0, -1.0, S)  # 欄が無い → 超音波だけで進む
-    assert c.step(est, S, 0.01, 200.0).speed > 0
+    c._ex_phase, c.station_wait = "plan", 0
+    c.plan = (0, PLAN_MOVE, 12.0, 1, 8.0, 0.0, 80.0, -1.0) + (0.0,) * 12
     c.set_clear(1, ctl.explore_clear_stop_cm + 50, S)
-    assert c.step(est, S, 0.01, 200.0).speed > 0
-    c.set_clear(1, ctl.explore_clear_stop_cm - 5, S)  # 画像で前が近い → 向きを変える
-    assert c.step(est, S, 0.01, 200.0).speed < 0 and c._ex_phase == "back"
-    c._ex_phase = "drive"
+    assert c.step(est, S, 0.01, None).speed > 0
+    c.set_clear(1, ctl.explore_clear_stop_cm - 5, S)  # 画像で前が近い → その 1 歩をやめて撮る
+    assert c.step(est, S, 0.01, None).speed == 0 and STOP_REASONS[c.last_step[1]] == "clear"
+    c._ex_phase, c.station_wait = "plan", 1
+    c.plan = (1, PLAN_MOVE, 12.0, 1, 8.0, 0.0, 80.0, -1.0) + (0.0,) * 12
     c.set_clear(2, -1.0, S)  # null が 0.3 s 続いたら止まって撮り直す
-    assert c.step(est, S + int(0.1 * S), 0.01, 200.0).speed > 0
-    assert c.step(est, S + int(0.35 * S), 0.01, 200.0).speed == 0 and c._ex_phase == "scan"
+    c.step(est, S, 0.01, None)
+    assert c.step(est, S + int(0.1 * S), 0.01, None).speed > 0
+    assert c.step(est, S + int(0.35 * S), 0.01, None).speed == 0 and c._ex_phase == "scan"
 
 
 def test_explore_asks_the_server_for_the_next_step():
-    from snoo_trucar.controller import EXPLORE_PANS, EXPLORE_TILTS, PLAN_DONE, PLAN_FALLBACK, PLAN_MOVE, STOP_REASONS
+    from snoo_trucar.controller import PLAN_DONE, PLAN_FALLBACK, PLAN_MOVE, STOP_REASONS, scan_schedule
 
     est = TargetEstimator(53.5, 41.4, 33.0)
     c, ctl = _controller("explore")
     dt = 0.01
     t = [0.0]
 
-    def run(seconds, us=200.0):
+    def run(seconds, us=None):
         x = None
         for _ in range(int(seconds / dt)):
             t[0] += dt
             x = c.step(est, S + int(t[0] * S), dt, us)
         return x
 
-    from snoo_trucar.controller import scan_schedule
-
     scan_s = scan_schedule(30.0, 0.0)[-1]  # 首が 30° 振れていても足りるように（先頭の待ちが長い分）
     x = run(scan_s + 0.05)
     assert c.station_wait == 0 and x.speed == 0  # 撮り終えて、サーバーの返事を待つ
     assert run(5.0).speed == 0
-    c.plan = (0, PLAN_MOVE, 12.0, 1, 10.0, 20.0, 0, 0, 0, 0)  # 右に 10° で 20 cm
+    c.set_clear(1, 100.0, S + int(t[0] * S))
+    c.plan = (0, PLAN_MOVE, 12.0, 1, 8.0, 10.0, 20.0, -1.0) + (0.0,) * 12  # 右に 10° で 20 cm
     x = run(0.1)
     assert x.steer == 10.0 and x.speed == 12.0 and c.station_wait == -1
     run(20.0 / (12.0 * c.car.cm_s_per_speed))
     assert c._ex_phase == "scan" and STOP_REASONS[c.last_step[1]] == "done"
     assert abs(c.last_step[0] - 20.0 / (12.0 * c.car.cm_s_per_speed)) < 0.1
-    # 次の station。超音波で前が近いと途中で止めて、理由を残す
+    # 前の版の PLAN_FALLBACK が来ても、Pi では道を決めずに待つ
     run(scan_s + 0.05)
-    assert c.station_wait == 1
-    c.plan = (1, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
-    run(0.5)
-    run(0.05, us=ctl.explore_step_stop_cm - 5)
-    assert STOP_REASONS[c.last_step[1]] == "ultrasonic"
-    # サーバーに届かない → Pi だけで決める。終わり → 待機
-    run(scan_s + 0.05)
-    c.plan = (2, PLAN_FALLBACK) + (0.0,) * 8
-    assert run(0.1).speed > 0 and c._ex_phase == "drive"
+    c.plan = (1, PLAN_FALLBACK) + (0.0,) * 18
+    assert run(1.0).speed == 0 and c._ex_phase == "plan"
+    # 終わり → 待機
     c2, _ = _controller("explore")
-    c2.station_wait, c2._ex_phase, c2.plan = 0, "plan", (0, PLAN_DONE) + (0.0,) * 8
-    c2.step(est, S, dt, 200.0)
+    c2.station_wait, c2._ex_phase, c2.plan = 0, "plan", (0, PLAN_DONE) + (0.0,) * 18
+    c2.step(est, S, dt, None)
     assert c2.mode == "idle"
 
 
@@ -633,7 +624,7 @@ def test_station_client_posts_and_writes_the_plan(tmp_path):
     from types import SimpleNamespace
 
     from snoo_trucar.control_proc import PLAN_N
-    from snoo_trucar.controller import PLAN_FALLBACK, PLAN_MOVE
+    from snoo_trucar.controller import PLAN_MOVE
     from snoo_trucar.station import StationClient
 
     got = {}
@@ -663,16 +654,18 @@ def test_station_client_posts_and_writes_the_plan(tmp_path):
     rec = SimpleNamespace(dir=d, entries=[{"file": "00_a.jpg", "station": 0},
                                           {"file": "d00001_b.jpg", "station": 1}])
     plan = SeqBuffer(PLAN_N)
-    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=[0.0] * 22)
+    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=[0.0] * 31)
     c = StationClient(runner, plan)
     try:
         c._session = "explore_x"
-        c._post(0, runner.last_cmd, rec)
+        assert c._post(0, runner.last_cmd, rec)
         assert b'"station_id": 0' in got["body"] and b"jpg0" in got["body"] and b"jpg1" not in got["body"]
-        assert tuple(plan.read()[1]) == (0, PLAN_MOVE, 12, 1, -8, 30, 0, 0, 0, 0)
-        cfg.server.map_url = "http://127.0.0.1:1/nothing"  # 届かない → Pi だけで決める
-        c._post(1, runner.last_cmd, rec)
-        assert plan.read()[1][:2].tolist() == [1, PLAN_FALLBACK]
+        # 前の版のサーバーの返事（区切りの reverse が無い）は前へ。後ろの速さは前と同じ
+        assert tuple(plan.read()[1][:8]) == (0, PLAN_MOVE, 12, 1, 12, -8, 30, -1)
+        n = plan.read()[0]
+        cfg.server.map_url = "http://127.0.0.1:1/nothing"  # 届かない → 書かずに送り直す
+        assert c._post(1, runner.last_cmd, rec) is False
+        assert plan.read()[0] == n
     finally:
         srv.shutdown()
         plan.close()
@@ -686,46 +679,27 @@ def test_explore_server_segments_and_reverse():
     dt = 0.01
     v = 12.0 * c.car.cm_s_per_speed
 
-    def go(plan, seconds, us=200.0):
+    def go(plan, seconds, us=None):
         c._ex_phase, c.station_wait, c.plan, c._ex_t = "plan", 0, plan, 0.0
         out = []
         for k in range(int(seconds / dt)):
+            c.set_clear(1, 100.0, S + int(k * dt * S))
             x = c.step(est, S + int(k * dt * S), dt, us)
             out.append((x.steer, x.speed, x.pan))
         return out
 
     # 曲がってからまっすぐ: 右 25° で 15 cm → まっすぐ 25 cm。曲がる間は首も右へ
-    out = go((0, PLAN_MOVE, 12.0, 2, 25.0, 15.0, 0.0, 25.0, 0, 0), 40 / v + 0.3)
+    out = go((0, PLAN_MOVE, 12.0, 2, 8.0, 25.0, 15.0, -1.0, 0.0, 25.0, -1.0) + (0.0,) * 9, 40 / v + 0.3)
     turn = [o for o in out if o[1] > 0 and o[0] == 25.0]
     straight = [o for o in out if o[1] > 0 and o[0] == 0.0]
     assert abs(len(turn) * dt - 15 / v) < 0.05 and abs(len(straight) * dt - 25 / v) < 0.05
     assert turn[-1][2] > 25.0  # 首は曲がる方へ（ハンドルの 1.5 倍、30° まで）
     assert STOP_REASONS[c.last_step[1]] == "done"
-    # 下がる: 前が近くても止めない（前の超音波は見ない）。距離は 30 cm まで
-    out = go((0, PLAN_MOVE, -12.0, 1, 20.0, 80.0, 0, 0, 0, 0), 80 / v, us=10.0)
+    # 下がる: 前が近くても止めない（前の画像は見ない）。距離は 30 cm まで、速さは後ろの速さ
+    out = go((0, PLAN_MOVE, 12.0, 1, 12.0, 20.0, -80.0, -1.0) + (0.0,) * 12, 80 / v, us=10.0)
     back = [o for o in out if o[1] < 0]
     assert all(o[0] == 20.0 for o in back)
     assert abs(len(back) * dt - ctl.explore_reverse_max_cm / v) < 0.05
-
-
-def test_explore_passes_low_obstacles():
-    from snoo_trucar.controller import LOW_OBSTACLE_SPEED, PLAN_MOVE, STOP_REASONS
-
-    est = TargetEstimator(53.5, 41.4, 33.0)
-    c, ctl = _controller("explore")
-    dt = 0.01
-    c._ex_phase, c.station_wait, c.plan = "plan", 0, (0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
-    c.step(est, S, dt, 200.0)
-    # 画像では 20 cm 先に何かある。超音波は 70 cm → 低い物。遅くして越える
-    c.set_clear(1, 20.0, S)
-    x = c.step(est, S, dt, 70.0)
-    assert x.speed == LOW_OBSTACLE_SPEED and c.low_passed == 1
-    # 超音波も近い → 止まる
-    c2, _ = _controller("explore")
-    c2._ex_phase, c2.station_wait, c2.plan = "plan", 0, (0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0)
-    c2.step(est, S, dt, 200.0)
-    c2.set_clear(1, 20.0, S)
-    assert c2.step(est, S, dt, 40.0).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear"
 
 
 def test_link_sends_fewer_frames_while_idle():

@@ -1,8 +1,9 @@
 """止まるべき時に止まるか（snoo_trucar#21 のレビュー）"""
 
 from snoo_trucar.config import CarConfig, ControlConfig
-from snoo_trucar.controller import PLAN_MOVE, STOP_REASONS, Controller, scan_schedule
+from snoo_trucar.controller import STOP_REASONS, Controller, scan_schedule
 from snoo_trucar.estimator import TargetEstimator
+from snoo_trucar.station import plan_row
 
 S = 1_000_000_000
 DT = 0.01
@@ -13,11 +14,17 @@ def _explore():
     return Controller(ctl, CarConfig()), ctl, TargetEstimator(53.5, 41.4, 33.0)
 
 
+def plan(station, segs, speed=12.0, back_speed=8.0):
+    """plan の共有メモリの 1 行。segs は [(ハンドル, cm, 後ろへか[, clear_cm の下限])]"""
+    segs = [(st, cm, b, (x[0] if x else None)) for st, cm, b, *x in segs]
+    return plan_row(station, segs, speed, back_speed)
+
+
 class Clock:
     def __init__(self, c, est):
         self.c, self.est, self.t = c, est, S
 
-    def run(self, seconds, us=200.0):
+    def run(self, seconds, us=None):
         x = None
         for _ in range(int(round(seconds / DT))):
             self.t += int(DT * S)
@@ -32,27 +39,27 @@ def test_set_mode_forgets_the_previous_explore():
     scan_s = scan_schedule(30.0, 0.0)[-1]
     k.run(scan_s + 0.05)
     assert c.station_wait == 0
-    c.set_plan((0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0))
+    c.set_plan(plan(0, [(0.0, 40.0, False)]))
     k.run(0.3)
     assert c._ex_phase == "step"
     c.set_mode("idle")
     k.run(0.05)
     c.set_mode("explore")
     assert c.plan is None and c.station_wait == -1 and c._ex_phase == "scan"
-    assert c._ex_sched_stop == -1 and c._ex_moved == 0.0 and c._low_left == 0.0 and c.low_passed == 0
+    assert c._ex_sched_stop == -1 and c._ex_moved == 0.0 and c.low_passed == 0
     # 新しい explore の station 0 を撮り終えたら、返事を待つ（前の返事では走らない）
     x = k.run(scan_s + 0.05)
     assert c.station_wait == 0 and c._ex_phase == "plan" and x.speed == 0
     assert k.run(1.0).speed == 0
     # 前の explore の遅れた返事（待っていないときに来た）は使わない
     c2, _, _ = _explore()
-    c2.set_plan((0, PLAN_MOVE, 12.0, 1, 0.0, 40.0, 0, 0, 0, 0))
+    c2.set_plan(plan(0, [(0.0, 40.0, False)]))
     assert c2.plan is None
 
 
 
-def test_station_drops_the_answer_when_explore_changed(tmp_path):
-    """返事を待つ間に explore が始め直されたら、前の explore の分の plan は書かない"""
+def test_station_does_not_plan_on_the_pi_when_the_server_is_unreachable(tmp_path):
+    """地図のサーバーに届かなければ、plan を書かずに送り直す（Pi だけで道を決めない）"""
     from types import SimpleNamespace
 
     from snoo_trucar.config import Config
@@ -65,24 +72,21 @@ def test_station_drops_the_answer_when_explore_changed(tmp_path):
     d = tmp_path / "explore_b"
     d.mkdir()
     rec = SimpleNamespace(dir=d, entries=[])
-    plan = SeqBuffer(PLAN_N)
-    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=[0.0] * 23)
-    c = StationClient(runner, plan)
+    buf = SeqBuffer(PLAN_N)
+    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=[0.0] * 31)
+    c = StationClient(runner, buf)
     try:
         c._session = "explore_a"  # 送ったときの explore
-        c._post(0, runner.last_cmd, rec)
-        assert plan.read()[0] == 0  # 書いていない
-        c._session = "explore_b"
-        c._post(0, runner.last_cmd, rec)
-        assert plan.read()[0] == 1
+        assert c._post(0, runner.last_cmd, rec) is False  # 届かない → 送り直す
+        assert buf.read()[0] == 0  # 書いていない（Pi で道を決めない）
     finally:
-        plan.close()
+        buf.close()
 
 
 def _server_step(c, k, cm=80.0, speed=12.0):
     """サーバーの 1 歩（まっすぐ cm）を走り始める"""
     c._ex_phase, c.station_wait = "plan", 0
-    c.set_plan((0, PLAN_MOVE, speed, 1, 0.0, cm, 0, 0, 0, 0))
+    c.set_plan(plan(0, [(0.0, cm, False)], speed))
     return k.run(DT)
 
 
@@ -110,19 +114,8 @@ def test_server_step_stops_when_clear_goes_stale():
     assert k2.run(0.1).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear_unknown"
 
 
-def test_pi_only_drive_ignores_stale_clear():
-    """Pi だけの探索（サーバーに届かない）では、古い clear_cm は今までどおり超音波だけで走る"""
-    from snoo_trucar.controller import CLEAR_STALE
-
-    c, ctl, est = _explore()
-    c._ex_us_at = 0.0
-    c._ex_phase = "drive"
-    c.set_clear(CLEAR_STALE, -1.0, S)
-    assert c.step(est, S + S, DT, 200.0).speed > 0
-
-
 def test_server_step_limits_a_long_clear_skip():
-    """clear_skip（出せない）が続く間は止めないが、速さ 10・20 cm まで。超音波が 60 cm より先なら上限なし"""
+    """clear_skip（出せない）が続く間は止めないが、速さ 10・20 cm まで（超音波では延ばさない）"""
     from snoo_trucar.controller import CLEAR_SKIP, CLEAR_SKIP_MAX_CM, CLEAR_SKIP_SPEED
 
     c, ctl, est = _explore()
@@ -130,90 +123,59 @@ def test_server_step_limits_a_long_clear_skip():
     _server_step(c, k, cm=80.0, speed=15.0)
     c.set_clear(CLEAR_SKIP, -1.0, k.t, k.t)
     v = CLEAR_SKIP_SPEED * c.car.cm_s_per_speed
-    x = k.run(CLEAR_SKIP_MAX_CM / v - 0.1, us=50.0)
+    x = k.run(CLEAR_SKIP_MAX_CM / v - 0.1, us=150.0)
     assert x.speed == CLEAR_SKIP_SPEED
-    x = k.run(0.2, us=50.0)
+    x = k.run(0.2, us=150.0)
     assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear_skip"
-    # 超音波が新しく 60 cm より先 → 上限なし
-    c2, _, est2 = _explore()
-    k2 = Clock(c2, est2)
-    _server_step(c2, k2, cm=80.0, speed=15.0)
-    c2.set_clear(CLEAR_SKIP, -1.0, k2.t, k2.t)
-    x = k2.run(2.0, us=150.0)
-    assert x.speed == 15.0
 
 
-def test_stale_ultrasonic_never_counts_as_far():
-    """超音波が古い（スレッドが止まった・測れていない）ときは、-1 と違って前に進まない"""
+def test_ultrasonic_never_stops_the_car():
+    """超音波は当てにならないので、近い値が続いても・測れなくても止まらない（clear_cm と guard で見る）"""
+    from snoo_trucar.controller import CLEAR_VALUE
+
     c, ctl, est = _explore()
     k = Clock(c, est)
-    c._ex_phase = "drive"
-    assert k.run(0.1, us=200.0).speed > 0
-    c.us_stale = True  # 制御プロセスが、300 ms より新しい超音波が無いと判断した
-    x = k.run(0.05, us=None)
-    assert x.speed <= 0
-    # サーバーの 1 歩でも止まる
-    c2, _, est2 = _explore()
-    k2 = Clock(c2, est2)
-    c2.set_clear(0, -1.0, k2.t)
-    k2.run(0.1, us=200.0)
-    assert _server_step(c2, k2).speed > 0
-    c2.us_stale = True
-    assert k2.run(0.05, us=None).speed == 0 and STOP_REASONS[c2.last_step[1]] == "ultrasonic"
-
-
-def test_no_echo_is_far_only_just_after_a_real_reading():
-    """-1（反響なし）を遠いとみなすのは、1 s 以内に測れていたときだけ"""
-    from snoo_trucar.controller import EXPLORE_US_TRUST_S
-
-    assert EXPLORE_US_TRUST_S <= 1.0
-    c, ctl, est = _explore()
-    k = Clock(c, est)
-    c.set_clear(0, -1.0, k.t)
-    k.run(0.1, us=200.0)
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
     assert _server_step(c, k).speed > 0
-    assert k.run(0.5, us=None).speed > 0  # 測れたばかり → 遠くまで空いているとみなす
-    x = k.run(0.6, us=None)
-    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "ultrasonic"
+    for us in (5.0, 5.0, None, 3.0):
+        c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+        assert k.run(0.1, us=us).speed > 0
+    assert c._ex_phase == "step"
 
 
-def test_server_step_with_clear_ignores_missing_ultrasonic():
-    """clear_cm が来ている 1 歩では、超音波の -1・古い値は情報なしで、止まる理由にしない"""
+def test_server_step_stops_when_the_camera_cannot_see():
+    """前を見ているカメラ（clear_cm）が途切れたら、0.3 s で止まる"""
     from snoo_trucar.controller import CLEAR_STALE, CLEAR_VALUE
 
     c, ctl, est = _explore()
     k = Clock(c, est)
     c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
     assert _server_step(c, k).speed > 0
-    for _ in range(20):  # 2 s ずっと -1（clear は撮るたびに来る）
-        c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
-        x = k.run(0.1, us=None)
-    assert x.speed > 0 and c._ex_phase == "step"
-    c.us_stale = True
-    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
-    assert k.run(0.1, us=None).speed > 0
-    # 前を見ているカメラが途切れたら、0.3 s で止まる
     c.set_clear(CLEAR_STALE, -1.0, k.t)
-    x = k.run(0.4, us=None)
+    x = k.run(0.4)
     assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear_unknown"
 
 
-def test_server_step_stops_only_on_repeated_near_ultrasonic():
-    """近い超音波 1 回（15 Hz で 67 ms）では止まらず、0.1 s（2 回）続けば止まる。-1 で数え直す"""
+def test_server_step_uses_the_larger_of_the_own_and_the_server_clear_limit():
+    """区切りの min_clear_cm（サーバーの見込み）が explore_clear_stop_cm より大きければそこで止まる。
+    小さければ Pi の explore_clear_stop_cm（サーバーは止まる近さを縮められない）"""
     from snoo_trucar.controller import CLEAR_VALUE
 
     c, ctl, est = _explore()
     k = Clock(c, est)
-    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
-    _server_step(c, k)
-    near = ctl.explore_step_stop_cm - 5
-    for _ in range(3):
-        c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
-        assert k.run(0.07, us=near).speed > 0  # 外れ値 1 回
-        assert k.run(0.07, us=None).speed > 0
-    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
-    x = k.run(0.14, us=near)
-    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "ultrasonic"
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan(plan(0, [(0.0, 80.0, False, 40.0)]))
+    c.set_clear(CLEAR_VALUE, 45.0, k.t, k.t)
+    assert k.run(DT).speed > 0
+    c.set_clear(CLEAR_VALUE, 35.0, k.t, k.t)
+    x = k.run(DT)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear"
+    c2, _, est2 = _explore()
+    k2 = Clock(c2, est2)
+    c2._ex_phase, c2.station_wait = "plan", 0
+    c2.set_plan(plan(0, [(0.0, 80.0, False, 5.0)]))
+    c2.set_clear(CLEAR_VALUE, ctl.explore_clear_stop_cm - 1, k2.t, k2.t)
+    assert k2.run(DT).speed == 0 and STOP_REASONS[c2.last_step[1]] == "clear"
 
 
 def test_control_proc_marks_old_ultrasonic_as_stale():
@@ -446,6 +408,7 @@ def test_camera_thread_survives_send_errors():
 
 
 def test_ultrasonic_thread_survives_read_errors():
+    """読めなくても落ちず、stuck・drive_ok は渡す（超音波では止まらない）"""
     import threading
 
     from snoo_trucar import control_proc
@@ -470,7 +433,7 @@ def test_ultrasonic_thread_survives_read_errors():
         t = threading.Thread(target=r._ultrasonic_loop, args=(Car(), us))
         t.start()
         t.join(5)
-        assert n[0] >= 3 and us.read()[1][1] == 50.0
+        assert n[0] >= 3 and us.read()[1][1] == 50.0 and r.last_us_t_ns > 0
     finally:
         us.close()
 
@@ -497,20 +460,16 @@ def test_runner_stops_the_car_when_a_thread_dies():
     assert car.log[-1] == ("stop",)
 
 
-def test_pi_only_reverse_is_at_most_30cm():
-    """Pi だけの切り返しで下がるのも、サーバーの 1 歩と同じく 30 cm まで（後ろは見えない）"""
+def test_reverse_segments_are_at_most_30cm_in_total():
+    """後ろへの区切りは、合わせて explore_reverse_max_cm まで（後ろは見えない）"""
     c, ctl, est = _explore()
-    ctl.explore_server = False
     k = Clock(c, est)
-    c._ex_phase, c._ex_t = "back", 0.0
-    back = 0
-    while True:  # 初めの 1 回の下がり
-        k.t += int(DT * S)
-        if c.step(est, k.t, DT, 40.0).speed >= 0:
-            break
-        back += 1
-    v = ctl.explore_speed * c.car.cm_s_per_speed
-    assert back > 0 and back * DT * v <= ctl.explore_reverse_max_cm + 0.5
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan(plan(0, [(28.0, 25.0, True), (-28.0, 10.0, False), (28.0, 25.0, True)]))
+    k.run(DT)
+    segs = c._ex_step[2]
+    assert sum(cm for _, cm, b, _ in segs if b) <= ctl.explore_reverse_max_cm + 1e-9
+    assert [b for *_, b, _ in segs] == [True, False, True]
 
 
 def _frames():
@@ -572,47 +531,16 @@ def test_motion_watch_restarts_when_the_direction_changes():
     assert w._moving_since == t  # 動き出しから数え直す
 
 
-def _low_pass(c, k):
-    """サーバーの 1 歩を走り始め、画像 20 cm・超音波 70 cm（低い物）で越え始める"""
-    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_SPEED
+def test_low_obstacles_are_not_driven_over_any_more():
+    """前の版は、超音波が先を見ていれば画像の近い物を「低い物」として越えた。今は clear_cm で止まる"""
+    from snoo_trucar.controller import CLEAR_VALUE
 
-    _server_step(c, k, cm=80.0, speed=12.0)
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    _server_step(c, k)
     c.set_clear(CLEAR_VALUE, 20.0, k.t, k.t)
-    x = k.run(DT, us=70.0)
-    assert x.speed == LOW_OBSTACLE_SPEED and c.low_passed == 1
-
-
-def test_low_obstacle_pass_only_once_per_step():
-    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_CM, LOW_OBSTACLE_SPEED
-
-    c, ctl, est = _explore()
-    k = Clock(c, est)
-    _low_pass(c, k)
-    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)  # 越えた
-    k.run(LOW_OBSTACLE_CM / (LOW_OBSTACLE_SPEED * c.car.cm_s_per_speed) + 0.1, us=70.0)
-    assert c._low_left <= 0 and c._ex_phase == "step"
-    c.set_clear(CLEAR_VALUE, 20.0, k.t, k.t)  # また近い。超音波は先 → でも 2 回目は越えない
-    x = k.run(DT, us=70.0)
-    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear" and c.low_passed == 1
-
-
-def test_low_obstacle_pass_stops_when_clear_shrinks():
-    """越えている間に、進んだ分より画像の空きが縮んだら（前に別の物が出てきた）止まる"""
-    from snoo_trucar.controller import CLEAR_VALUE, LOW_OBSTACLE_SPEED
-
-    c, ctl, est = _explore()
-    k = Clock(c, est)
-    _low_pass(c, k)
-    v = LOW_OBSTACLE_SPEED * c.car.cm_s_per_speed
-    # 進んだ分だけ近づく（同じ低い物）→ 越え続ける
-    for _ in range(20):
-        moved = (k.t - S) / S * v
-        c.set_clear(CLEAR_VALUE, max(0.0, 20.0 - moved), k.t, k.t)
-        assert k.run(DT, us=70.0).speed == LOW_OBSTACLE_SPEED
-    # 急に 8 cm 先 → 止まる
-    c.set_clear(CLEAR_VALUE, 8.0, k.t, k.t)
-    x = k.run(DT, us=70.0)
-    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear"
+    x = k.run(DT, us=200.0)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "clear" and c.low_passed == 0
 
 
 def test_server_step_counts_only_the_distance_actually_driven():
@@ -621,7 +549,7 @@ def test_server_step_counts_only_the_distance_actually_driven():
 
     c, ctl, est = _explore()
     k = Clock(c, est)
-    c.set_clear(0, -1.0, k.t)
+    c.set_clear(1, 100.0, k.t, k.t)  # 前は空いている（CLEAR_VALUE）
     v = 12.0 * c.car.cm_s_per_speed
     _server_step(c, k, cm=20.0, speed=12.0)
     c.drive_ok = False  # メインプロセスが、電池が少ないので速さ 0 で書いている
@@ -633,7 +561,7 @@ def test_server_step_counts_only_the_distance_actually_driven():
     # guard が待たせている（HOLD）間も進まない
     c2, _, est2 = _explore()
     k2 = Clock(c2, est2)
-    c2.set_clear(0, -1.0, k2.t)
+    c2.set_clear(1, 100.0, k2.t, k2.t)
     _server_step(c2, k2, cm=20.0, speed=12.0)
     c2.guard.state = HOLD
     c2.guard._calm_since = None
@@ -644,23 +572,66 @@ def test_server_step_counts_only_the_distance_actually_driven():
 
 def test_server_step_reports_the_segments_actually_driven():
     """途中で止まったら、走った区切りまで（最後は止まった所まで）を返す"""
+    from snoo_trucar.controller import CLEAR_VALUE
+
     c, ctl, est = _explore()
     k = Clock(c, est)
-    c.set_clear(0, -1.0, k.t)
+    c.set_clear(1, 100.0, k.t, k.t)  # 前は空いている（CLEAR_VALUE）
     v = 15.0 * c.car.cm_s_per_speed
     c._ex_phase, c.station_wait = "plan", 3
-    c.set_plan((3, PLAN_MOVE, 40.0, 2, 20.0, 15.0, 0.0, 40.0, 0, 0))  # 速さ 40 は 15 に抑える
+    c.set_plan(plan(3, [(20.0, 15.0, False), (0.0, 40.0, False)], speed=40.0))  # 速さ 40 は 15 に
     k.run(DT)
     assert c.step_station == 3 and c._ex_step[0] == ctl.explore_speed
     k.run((15.0 + 10.0) / v)
-    k.run(DT, us=ctl.explore_step_stop_cm - 5)  # 2 つ目の区切りの途中で止まる
-    assert STOP_REASONS[c.last_step[1]] == "ultrasonic"
-    assert abs(c.step_driven[0] - 15.0) < 0.5 and abs(c.step_driven[1] - 10.0) < 1.0 and c.step_driven[2] == 0
+    c.set_clear(CLEAR_VALUE, 10.0, k.t, k.t)  # 2 つ目の区切りの途中で止まる
+    k.run(DT)
+    assert STOP_REASONS[c.last_step[1]] == "clear"
+    assert abs(c.step_driven[0] - 15.0) < 0.5 and abs(c.step_driven[1] - 10.0) < 1.0
+    assert c.step_driven[2] == 0
+
+
+def test_mixed_gear_step_runs_each_segment_in_its_own_direction():
+    """前 10 cm → 後ろ 10 cm → 前 10 cm。向きを替えるときは止まって待ち、区切りごとの距離を数える。
+    下がる区切りでは clear_cm を見ない（下がるときは前の画像は当てにならない）"""
+    from snoo_trucar.controller import CLEAR_VALUE, GEAR_PAUSE_S
+
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan(plan(0, [(28.0, 10.0, False), (-28.0, 10.0, True), (28.0, 10.0, False)],
+                    speed=12.0, back_speed=8.0))  # fmt: skip
+    speeds = []
+    for _ in range(int(6.0 / DT)):
+        if c._ex_step[2] and c._ex_seg == 2:
+            c.set_clear(CLEAR_VALUE, 100.0, k.t, k.t)
+        if c._ex_seg == 1:
+            c.set_clear(CLEAR_VALUE, 5.0, k.t, k.t)  # 下がる間は前が近く見えても止まらない
+        x = k.run(DT)
+        speeds.append(x.speed)
+        if c._ex_phase != "step":
+            break
+    assert STOP_REASONS[c.last_step[1]] == "done"
+    assert 12.0 in speeds and -8.0 in speeds
+    assert all(abs(d - 10.0) < 0.6 for d in c.step_driven[:3])
+    # 前から後ろへ替わる所で、GEAR_PAUSE_S の間は 0
+    i = speeds.index(-8.0)
+    assert all(v == 0 for v in speeds[i - int(GEAR_PAUSE_S / DT) + 1 : i])
+
+
+def test_reverse_segment_stops_when_stuck():
+    c, ctl, est = _explore()
+    k = Clock(c, est)
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan(plan(0, [(0.0, 20.0, True)]))
+    assert k.run(DT).speed < 0
+    c.stuck = True
+    x = k.run(DT)
+    assert x.speed == 0 and STOP_REASONS[c.last_step[1]] == "stuck"
 
 
 def test_station_prev_step_from_what_was_driven(monkeypatch, tmp_path):
-    """prev_step は制御プロセスが数えた距離・使った速さ・走った区切り。25 s 待って Pi だけで決めた後に
-    遅れて来た返事は、次の prev_step に使わない"""
+    """prev_step は制御プロセスが数えた距離・使った速さ・走った区切り（区切りごとの前・後ろ）"""
     import json
     from types import SimpleNamespace
 
@@ -669,14 +640,15 @@ def test_station_prev_step_from_what_was_driven(monkeypatch, tmp_path):
     from snoo_trucar.config import Config
     from snoo_trucar.control_proc import CMD_N, PLAN_N
     from snoo_trucar.shm import SeqBuffer
-    from snoo_trucar.station import StationClient
+    from snoo_trucar.station import SUPPORTS, StationClient
 
     sent = []
 
     def post(url, data, files, timeout):
         sent.append(json.loads(data["meta"]))
-        body = {"action": "move", "speed": 40, "segments": [{"steer_deg": 20, "distance_cm": 15},
-                                                             {"steer_deg": 0, "distance_cm": 40}]}  # fmt: skip
+        body = {"action": "move", "speed": 40, "reverse_speed": 8,
+                "segments": [{"steer_deg": 20, "distance_cm": 15, "reverse": True},
+                             {"steer_deg": 0, "distance_cm": 40, "reverse": False}]}  # fmt: skip
         return SimpleNamespace(status_code=200, text="", json=lambda: body)
 
     monkeypatch.setattr(requests, "post", post)
@@ -684,28 +656,33 @@ def test_station_prev_step_from_what_was_driven(monkeypatch, tmp_path):
     d = tmp_path / "explore_a"
     d.mkdir()
     rec = SimpleNamespace(dir=d, entries=[])
-    plan = SeqBuffer(PLAN_N)
+    buf = SeqBuffer(PLAN_N)
     v = [0.0] * CMD_N
-    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_cmd=v)
-    c = StationClient(runner, plan)
+    runner = SimpleNamespace(cfg=cfg, recorder=rec, battery_v=7.9, last_us=120.0, last_us_t_ns=5,
+                             last_cmd=v)  # fmt: skip
+    c = StationClient(runner, buf)
     c._session = "explore_a"
     try:
-        c._post(0, v, rec)
-        # station 0 の 1 歩: 速さ 15 で、1 つ目 15 cm、2 つ目 10 cm で止まった
-        v[19], v[20], v[22] = 1.2, STOP_REASONS.index("ultrasonic"), 0
+        assert c._post(0, v, rec)
+        assert "gear_segments" in sent[-1]["supports"] and sent[-1]["supports"] == SUPPORTS
+        assert sent[-1]["ultrasonic"] == {"cm": 120.0, "t_ns": 5}
+        row = buf.read()[1]
+        assert row[3] == 2 and tuple(map(float, row[5:8])) == (20.0, -15.0, -1.0) and row[4] == 8.0
+        # station 0 の 1 歩：後ろへ 15 cm、前へ 10 cm で止まった
+        v[19], v[20], v[22] = 1.2, STOP_REASONS.index("clear"), 0
         v[23], v[24], v[25], v[26], v[27], v[28] = 0, 15.0, 25.0, 15.0, 10.0, 0.0
         c._post(1, v, rec)
         prev = sent[-1]["prev_step"]
         assert prev["est_distance_cm"] == 25.0 and prev["speed"] == 15.0 and not prev["reverse"]
-        assert prev["segments"] == [{"steer_deg": 20.0, "distance_cm": 15.0},
-                                    {"steer_deg": 0.0, "distance_cm": 10.0}]  # fmt: skip
-        assert prev["steer_deg"] == 0.0 and prev["stop_reason"] == "ultrasonic"
-        # station 1 の返事は遅れ、制御プロセスは Pi だけで決めた（step_station = -1）
+        assert prev["segments"] == [{"steer_deg": 20.0, "distance_cm": 15.0, "reverse": True},
+                                    {"steer_deg": 0.0, "distance_cm": 10.0, "reverse": False}]  # fmt: skip
+        assert prev["steer_deg"] == 0.0 and prev["stop_reason"] == "clear"
+        # 走っていない（step_station = -1）なら prev_step は無し
         v[23] = -1
         c._post(2, v, rec)
-        assert sent[-1]["prev_step"] == {"stop_reason": "local"}
+        assert sent[-1]["prev_step"] is None
     finally:
-        plan.close()
+        buf.close()
 
 
 def _explore_with_snoo(session_s=None):
@@ -715,8 +692,8 @@ def _explore_with_snoo(session_s=None):
     if session_s is not None:
         ctl.guard = GuardConfig(session_s=session_s)
     c = Controller(ctl, CarConfig())
-    c._ex_us_at = 0.0
-    c._ex_phase = "drive"
+    c._ex_phase, c.station_wait = "plan", 0
+    c.set_plan(plan(0, [(0.0, 400.0, False)]))
     c.set_clear(0, -1.0, S)
     return c, ctl, TargetEstimator(53.5, 41.4, 33.0)
 
@@ -756,7 +733,8 @@ def test_explore_play_time_limit_counts_only_while_snoo_is_around():
         t += int(DT * S)
         c.step(est, t, DT, 200.0)
     assert c.guard.state != REST
-    c._ex_phase, c._ex_moved = "drive", 0.0
+    c._ex_phase, c.station_wait = "plan", 1
+    c.set_plan(plan(1, [(0.0, 400.0, False)]))
     for _ in range(int(2.5 / DT)):
         t += int(DT * S)
         _see(est, t, 300.0)
@@ -774,25 +752,26 @@ def test_explore_still_stops_and_watches_a_near_snoo():
 
 
 def test_server_step_starts_while_waiting_for_the_first_clear():
-    """1 歩を始めた瞬間は clear の欄がまだ無い（止まっていたフレームの返事）。超音波が -1 でも
-    すぐには止めず、clear_skip（走り出した直後）が来ればそのまま進む。来なければ 0.5 s で止まる"""
-    from snoo_trucar.controller import CLEAR_ABSENT, CLEAR_ABSENT_GRACE_S, CLEAR_SKIP
+    """1 歩を始めた瞬間は clear の欄がまだ無い（止まっていたフレームの返事）。すぐには止めず、
+    clear_skip（走り出した直後）が来ればそのまま進む。0.5 s 待っても欄が無ければ（clear_cm を出さない
+    サーバー）、見えていないので clear_skip と同じく遅く・20 cm まで"""
+    from snoo_trucar.controller import CLEAR_ABSENT, CLEAR_SKIP, CLEAR_SKIP_MAX_CM, CLEAR_SKIP_SPEED
 
     c, ctl, est = _explore()
     k = Clock(c, est)
     c.set_clear(CLEAR_ABSENT, -1.0, k.t)
-    # 超音波は始めからずっと -1（23:10 の探索と同じ。測れた値を信じる 1 s も使えない）
     c._ex_phase, c.station_wait = "plan", 0
-    c.set_plan((0, PLAN_MOVE, 12.0, 1, 0.0, 80.0, 0, 0, 0, 0))
-    assert k.run(DT, us=None).speed > 0
-    assert k.run(0.1, us=None).speed > 0  # 欄が無いまま 0.1 s
+    c.set_plan(plan(0, [(0.0, 80.0, False)]))
+    assert k.run(DT).speed > 0
+    assert k.run(0.1).speed > 0  # 欄が無いまま 0.1 s
     c.set_clear(CLEAR_SKIP, -1.0, k.t)  # 走り出したフレームの返事（settling）
-    assert k.run(0.2, us=None).speed > 0
-    # clear を返さないサーバー：0.5 s 待っても欄が無ければ、今までどおり超音波で止まる
+    assert k.run(0.2).speed > 0
     c2, _, est2 = _explore()
     k2 = Clock(c2, est2)
     c2.set_clear(CLEAR_ABSENT, -1.0, k2.t)
     _server_step(c2, k2)
-    # 始めに測れた超音波（200 cm）を信じる 1 s（EXPLORE_US_TRUST_S）も過ぎたら止まる
-    x = k2.run(max(CLEAR_ABSENT_GRACE_S, 1.0) + 0.2, us=None)
-    assert x.speed == 0 and STOP_REASONS[c2.last_step[1]] == "ultrasonic"
+    assert k2.run(0.6).speed == CLEAR_SKIP_SPEED
+    k2.run(CLEAR_SKIP_MAX_CM / (CLEAR_SKIP_SPEED * c2.car.cm_s_per_speed) + 0.1)
+    assert STOP_REASONS[c2.last_step[1]] == "clear_skip"
+
+
