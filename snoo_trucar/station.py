@@ -238,6 +238,9 @@ class StationClient:
             elif ans.get("action") == "done":
                 plan = (k, PLAN_DONE) + (0.0,) * (PLAN_N - 2)
                 self.last = f"station {k}: 終わり（{ans.get('reason')}）"
+                voice = getattr(self.runner, "voice", None)
+                if voice is not None:
+                    voice.done_reason = str(ans.get("reason") or "")  # 終えたときの知らせの文
             else:
                 raise RuntimeError(f"知らない返事: {ans}")
         except Rejected as e:

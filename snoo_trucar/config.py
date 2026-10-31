@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .guard import GuardConfig
+from .voice import VoiceConfig
 
 DEFAULT_PATH = Path.home() / ".config" / "snoo_trucar" / "config.toml"
 
@@ -188,6 +189,8 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     car: CarConfig = field(default_factory=CarConfig)
+    # 声（voice.py）。設定ファイルでは [voice]
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     # map で撮った画像の置き場所（map_日時/ に画像と scan.json）
     map_dir: str = "~/captures/snoo_map"
     seen_dir: str = "~/captures/snoo_seen"  # 追い始めたときの画像と箱

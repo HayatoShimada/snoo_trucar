@@ -17,6 +17,12 @@ Robot HAT の USR ボタンで行動を選ぶ。LED の点滅の回数が今の�
 
 RST ボタンは Robot HAT のマイコンのリセットなので使わない。
 
+声（`snoo_trucar/voice.py`）：地図のサーバーの `say/next` を 1.5 秒ごとに見て鳴らし、出来事（explore を始めた・終えた、
+詰まった、電池が少ない、snoo を見つけた）を短く話す（文の wav はサーバーの `POST /v1/snoo/agent/say` で作る）。
+GPIO 20 でアンプをオンにして `aplay -q -D plughw:sndrpihifiberry,0`。guard が OK でない・snoo が 150 cm より近いときは
+鳴らさない。1 分 6 回まで、wav の大きさは 0.6 倍。`[voice] enabled = false` で切る。Robot HAT の電源スイッチが
+オフだと鳴らない
+
 explore の間は `~/.local/state/snoo_trucar/explore.json` に session_id・次の station・今の段階を書く。
 `--mode` を決めずに起動し直したとき、それが 10 分以内なら同じセッションの続きの station から explore に戻る
 （まずその場で首を振って撮り、`prev_step` は null。走るのはサーバーの返事が来てから）。explore をやめたら

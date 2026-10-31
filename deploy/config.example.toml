@@ -14,3 +14,10 @@ keep_distance_cm = 80
 max_speed = 30
 # 探すときに車体も動かすか（false ならカメラを振るだけ）
 search_drive = false
+
+[voice]
+# Robot HAT のスピーカーで、サーバーの声（say/next）と出来事の知らせを鳴らす（snoo_trucar/voice.py）
+enabled = true
+events = true
+max_per_min = 6
+gain = 0.6

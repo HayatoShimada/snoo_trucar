@@ -74,6 +74,7 @@ class Runner:
         self.motion = None  # MotionWatch（実機のときだけ）
         self.recorder = None
         self.station = None
+        self.voice = None  # 声（voice.py。実機のときだけ）
         self._low_since: float | None = None  # 電池が shutdown_v より低くなった時刻
         self.battery_v: float | None = None
         self.thread_died: str | None = None  # 死んだスレッドの名前（書き込みのループが止めて抜ける）
@@ -195,6 +196,11 @@ class Runner:
 
             self.station = StationClient(self, plan, self.explore_state)
             threads.append(self._thread("station", self.station.run, self.stop))
+            if cfg.voice.enabled:
+                from .voice import Voice, base_url
+
+                self.voice = Voice(self, cfg.voice, base_url(cfg.server.map_url))
+                threads.append(self._thread("声", self.voice.run, self.stop))
             if self.buttons:
                 from .buttons import Panel
 
